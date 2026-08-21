@@ -34,7 +34,11 @@ data class PlateSighting(
     val notes: String? = null,
     val isSynced: Boolean = false,
     val cloudId: String? = null,
-    val spotSpeedMph: Int = 24
+    val spotSpeedMph: Int = 24,
+    /** Compass heading in degrees (0-360) the camera was facing at capture time, or -1 if unknown. */
+    val headingDegrees: Float = -1f,
+    /** Compass direction label (e.g. "NE"), or empty if unknown. */
+    val headingLabel: String = ""
 )
 
 @Entity(tableName = "flagged_plates")

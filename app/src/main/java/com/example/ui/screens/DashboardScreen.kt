@@ -120,7 +120,7 @@ fun DashboardScreen(
                                             .background(AlertGreen)
                                     )
                                     Text(
-                                        text = "Optical ALPR Engine: Active",
+                                        text = "Scanner active",
                                         color = AlertGreen,
                                         fontSize = 11.sp,
                                         fontWeight = FontWeight.Bold
@@ -147,7 +147,7 @@ fun DashboardScreen(
                                         modifier = Modifier.size(14.dp)
                                     )
                                     Text(
-                                        text = "Cloud: ${stats.syncedCount} Synced",
+                                        text = "${stats.syncedCount} synced",
                                         color = TechCyanPrimary,
                                         fontSize = 11.sp,
                                         fontWeight = FontWeight.Medium
@@ -158,13 +158,13 @@ fun DashboardScreen(
 
                         Column {
                             Text(
-                                text = "ANPR Optical Patrol Hub",
+                                text = "Plate Scanner",
                                 color = TextPrimary,
                                 fontSize = 18.sp,
                                 fontWeight = FontWeight.Black
                             )
                             Text(
-                                text = "Camera-to-Text Recognition • Geotagging • Real-Time Watchlist",
+                                text = "Scan, locate, and track vehicle plates",
                                 color = TextSecondary,
                                 fontSize = 11.sp
                             )
@@ -182,9 +182,9 @@ fun DashboardScreen(
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     KpiCard(
-                        title = "Total Plate Scans",
+                        title = "Total Scans",
                         value = "${stats.totalScans}",
-                        subtitle = "Active patrol logs",
+                        subtitle = "All logged sightings",
                         icon = Icons.Default.DocumentScanner,
                         color = TechCyanPrimary,
                         modifier = Modifier.weight(1f)
@@ -192,7 +192,7 @@ fun DashboardScreen(
                     KpiCard(
                         title = "Unique Vehicles",
                         value = "${stats.uniquePlatesCount}",
-                        subtitle = "Individual targets",
+                        subtitle = "Distinct plates seen",
                         icon = Icons.Default.DirectionsCar,
                         color = TechBlueAccent,
                         modifier = Modifier.weight(1f)
@@ -204,9 +204,9 @@ fun DashboardScreen(
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     KpiCard(
-                        title = "Flagged Alerts Today",
+                        title = "Flagged Today",
                         value = "${stats.flaggedCountToday}",
-                        subtitle = "Watchlist detections",
+                        subtitle = "Watchlist matches",
                         icon = Icons.Default.Warning,
                         color = AlertRed,
                         isAlert = stats.flaggedCountToday > 0,
@@ -215,7 +215,7 @@ fun DashboardScreen(
                     KpiCard(
                         title = "Active Watchlist",
                         value = "${stats.totalFlaggedActive}",
-                        subtitle = "BOLO & stolen plates",
+                        subtitle = "Flagged plates",
                         icon = Icons.Default.Shield,
                         color = AlertOrange,
                         modifier = Modifier.weight(1f)
@@ -244,7 +244,7 @@ fun DashboardScreen(
                 ) {
                     Icon(Icons.Default.Videocam, contentDescription = null, modifier = Modifier.size(20.dp))
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Live Drive-By Scanner", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    Text("Open Scanner", fontWeight = FontWeight.Bold, fontSize = 13.sp)
                 }
 
                 OutlinedButton(
@@ -295,7 +295,7 @@ fun DashboardScreen(
                         }
                         Column {
                             Text(
-                                text = "TOP PATROL HOTSPOT",
+                                text = "MOST SCANNED LOCATION",
                                 color = TechCyanPrimary,
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.Bold,
@@ -337,7 +337,7 @@ fun DashboardScreen(
                 ) {
                     Icon(Icons.Default.History, contentDescription = null, tint = TechCyanPrimary, modifier = Modifier.size(18.dp))
                     Text(
-                        text = "LIVE SIGHTING FEED",
+                        text = "RECENT SIGHTINGS",
                         color = TextPrimary,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Bold,
@@ -346,7 +346,7 @@ fun DashboardScreen(
                 }
 
                 Text(
-                    text = "${recentSightings.size} logged vehicles",
+                    text = "${recentSightings.size} vehicles",
                     color = TextSecondary,
                     fontSize = 12.sp
                 )
@@ -378,13 +378,13 @@ fun DashboardScreen(
                             modifier = Modifier.size(36.dp)
                         )
                         Text(
-                            text = "Live Sentry Feed Ready",
+                            text = "No sightings yet",
                             color = TextPrimary,
                             fontWeight = FontWeight.Bold,
                             fontSize = 15.sp
                         )
                         Text(
-                            text = "Point your camera towards passing traffic in the Scanner tab to automatically detect license plates, capture vehicle snippets, and record geotags.",
+                            text = "Open the Scanner tab and point the camera at a vehicle to start logging plates.",
                             color = TextSecondary,
                             fontSize = 12.sp,
                             textAlign = androidx.compose.ui.text.style.TextAlign.Center
@@ -508,7 +508,7 @@ fun SightingFeedCard(
                 }
 
                 Text(
-                    text = "📍 ${sighting.locationName}",
+                    text = sighting.locationName,
                     color = TextSecondary,
                     fontSize = 11.sp,
                     maxLines = 1,
@@ -531,7 +531,7 @@ fun SightingFeedCard(
                     )
                     if (sighting.isFlagged) {
                         Text(
-                            text = "🚨 ${sighting.flagReason ?: "FLAGGED"}",
+                            text = sighting.flagReason ?: "Flagged",
                             color = AlertRed,
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Bold,

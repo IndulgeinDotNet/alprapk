@@ -108,12 +108,12 @@ fun SeverityBadge(
     modifier: Modifier = Modifier
 ) {
     val (bgColor, textColor, label) = when (severityName) {
-        AlertSeverity.CRITICAL.name -> Triple(AlertRedBg, AlertRed, "CRITICAL / STOLEN")
-        AlertSeverity.WARNING.name -> Triple(AlertOrangeBg, AlertOrange, "WARNING / SUSPICIOUS")
-        AlertSeverity.BOLO.name -> Triple(Color(0xFF3B154C), AlertPurple, "BOLO ALERT")
-        AlertSeverity.PARKING_VIOLATION.name -> Triple(Color(0xFF38081E), Color(0xFFFF4081), "PARKING / IMPOUND")
-        AlertSeverity.VIP.name -> Triple(Color(0xFF0C2444), AlertBlue, "VIP PERMIT")
-        else -> Triple(Color(0xFF072B20), AlertGreen, "LOGGED / CLEAR")
+        AlertSeverity.CRITICAL.name -> Triple(AlertRedBg, AlertRed, "Critical")
+        AlertSeverity.WARNING.name -> Triple(AlertOrangeBg, AlertOrange, "Warning")
+        AlertSeverity.BOLO.name -> Triple(Color(0xFF3B154C), AlertPurple, "BOLO")
+        AlertSeverity.PARKING_VIOLATION.name -> Triple(Color(0xFF38081E), Color(0xFFFF4081), "Parking")
+        AlertSeverity.VIP.name -> Triple(Color(0xFF0C2444), AlertBlue, "VIP")
+        else -> Triple(Color(0xFF072B20), AlertGreen, "Clear")
     }
 
     Surface(
@@ -185,7 +185,7 @@ fun RealTimeAlertBanner(
                                 modifier = Modifier.size(24.dp)
                             )
                             Text(
-                                text = "WATCHLIST MATCH DETECTED",
+                                text = "Watchlist match",
                                 color = AlertRed,
                                 fontWeight = FontWeight.Black,
                                 fontSize = 14.sp,
@@ -224,7 +224,7 @@ fun RealTimeAlertBanner(
                                 .padding(start = 12.dp)
                         ) {
                             Text(
-                                text = sighting.flagReason ?: "Flagged on active security watchlist",
+                                text = sighting.flagReason ?: "Flagged on watchlist",
                                 color = TextPrimary,
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 13.sp,
@@ -238,7 +238,7 @@ fun RealTimeAlertBanner(
                                 fontSize = 12.sp
                             )
                             Text(
-                                text = "📍 ${sighting.locationName}",
+                                text = sighting.locationName,
                                 color = TechCyanPrimary,
                                 fontSize = 11.sp,
                                 maxLines = 1,
@@ -266,7 +266,7 @@ fun RealTimeAlertBanner(
                         ) {
                             Icon(Icons.Default.Visibility, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("View Dossier & Route", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            Text("View details", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                         }
 
                         OutlinedButton(

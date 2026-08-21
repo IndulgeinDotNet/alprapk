@@ -50,14 +50,14 @@ fun WatchlistScreen(
         ) {
             Column {
                 Text(
-                    text = "BOLO & FLAGGED WATCHLIST",
+                    text = "WATCHLIST",
                     color = TechCyanPrimary,
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
                     letterSpacing = 1.sp
                 )
                 Text(
-                    text = "${watchlist.count { it.isActive }} Active Alert Targets",
+                    text = "${watchlist.count { it.isActive }} active alerts",
                     color = TextPrimary,
                     fontSize = 18.sp,
                     fontWeight = FontWeight.Black
@@ -75,7 +75,7 @@ fun WatchlistScreen(
             ) {
                 Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(modifier = Modifier.width(4.dp))
-                Text("Add Target", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Text("Add plate", fontSize = 12.sp, fontWeight = FontWeight.Bold)
             }
         }
 
@@ -244,7 +244,7 @@ private fun AddWatchlistDialog(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
-                        text = "FLAG VEHICLE PLATE",
+                        text = "Add to watchlist",
                         color = AlertRed,
                         fontSize = 16.sp,
                         fontWeight = FontWeight.Black
@@ -315,8 +315,8 @@ private fun AddWatchlistDialog(
                 OutlinedTextField(
                     value = reasonText,
                     onValueChange = { reasonText = it },
-                    label = { Text("Reason for Flag / BOLO *") },
-                    placeholder = { Text("e.g. Stolen Vehicle / Amber Alert Query") },
+                    label = { Text("Reason *") },
+                    placeholder = { Text("e.g. Reported stolen") },
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("input_watchlist_reason"),
@@ -347,8 +347,8 @@ private fun AddWatchlistDialog(
                 OutlinedTextField(
                     value = caseNumText,
                     onValueChange = { caseNumText = it },
-                    label = { Text("Case Number / Agency") },
-                    placeholder = { Text("e.g. SFPD #84910") },
+                    label = { Text("Reference (optional)") },
+                    placeholder = { Text("e.g. Case #1234") },
                     modifier = Modifier.fillMaxWidth(),
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedBorderColor = AlertRed,
@@ -393,7 +393,7 @@ private fun AddWatchlistDialog(
                             contentColor = Color.White
                         )
                     ) {
-                        Text("Flag Plate", fontWeight = FontWeight.Bold)
+                        Text("Add plate", fontWeight = FontWeight.Bold)
                     }
                 }
             }

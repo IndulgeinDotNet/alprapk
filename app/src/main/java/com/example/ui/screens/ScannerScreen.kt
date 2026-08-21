@@ -66,6 +66,13 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.InputStream
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicLong
+
+// Minimum gap between OCR passes on the live camera stream. Running full-resolution text
+// recognition on literally every incoming frame overloads the analyzer thread and makes the
+// whole preview feel laggy; this caps it to a steady, sustainable rate while still giving the
+// temporal consensus tracker plenty of independent reads per second to vote across.
+private const val MIN_FRAME_INTERVAL_MS = 280L
 
 @Composable
 fun ScannerScreen(
@@ -85,10 +92,13 @@ fun ScannerScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
 
     var hasCameraPermission by remember { mutableStateOf(false) }
+    var hasLocationPermission by remember { mutableStateOf(false) }
     val permissionsLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { perms ->
         hasCameraPermission = perms[Manifest.permission.CAMERA] ?: false
+        hasLocationPermission = (perms[Manifest.permission.ACCESS_FINE_LOCATION] ?: false) ||
+            (perms[Manifest.permission.ACCESS_COARSE_LOCATION] ?: false)
     }
 
     LaunchedEffect(Unit) {
@@ -120,7 +130,7 @@ fun ScannerScreen(
     var imageCapture: ImageCapture? by remember { mutableStateOf(null) }
     var lensFacing by remember { mutableStateOf(CameraSelector.LENS_FACING_BACK) }
 
-    // Fast scanning reticle animation
+    // Scanning reticle animation
     val infiniteTransition = rememberInfiniteTransition(label = "scanner_laser")
     val laserPosition by infiniteTransition.animateFloat(
         initialValue = 0f,
@@ -132,13 +142,17 @@ fun ScannerScreen(
         label = "laser_y"
     )
 
-    Box(
+    BoxWithConstraints(
         modifier = modifier
             .fillMaxSize()
             .background(TechDarkBg)
             .testTag("scanner_screen")
     ) {
-        // High Frame-Rate Real-Time Video ALPR Stream
+        val isLandscape = maxWidth > maxHeight
+        val bottomBarHeight = if (isLandscape) 84.dp else 115.dp
+        val bannerBottomPadding = bottomBarHeight + 10.dp
+
+        // Live camera preview + on-device OCR stream
         if (hasCameraPermission) {
             AndroidView(
                 factory = { ctx ->
@@ -148,6 +162,7 @@ fun ScannerScreen(
                     }
                     val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
                     val analysisExecutor = Executors.newSingleThreadExecutor()
+                    val lastOcrTimestamp = AtomicLong(0L)
 
                     cameraProviderFuture.addListener({
                         val cameraProvider = cameraProviderFuture.get()
@@ -162,17 +177,23 @@ fun ScannerScreen(
                             .build()
                         imageCapture = capture
 
-                        // High-speed low-latency continuous stream image analyzer.
-                        // Higher analysis resolution than the preview so plate characters
-                        // still have enough pixels to read when the whole vehicle - not just
-                        // the plate - fills the frame (i.e. the user doesn't have to get close).
+                        // Continuous stream analyzer, throttled to MIN_FRAME_INTERVAL_MS so the
+                        // recognizer isn't fighting for every single incoming frame.
                         val imageAnalysis = ImageAnalysis.Builder()
-                            .setTargetResolution(Size(1920, 1080))
+                            .setTargetResolution(Size(1280, 720))
                             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                             .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
                             .build()
 
                         imageAnalysis.setAnalyzer(analysisExecutor) { imageProxy ->
+                            val now = System.currentTimeMillis()
+                            val last = lastOcrTimestamp.get()
+                            if (now - last < MIN_FRAME_INTERVAL_MS) {
+                                imageProxy.close()
+                                return@setAnalyzer
+                            }
+                            lastOcrTimestamp.set(now)
+
                             val mediaImage = imageProxy.image
                             if (mediaImage != null) {
                                 val rotation = imageProxy.imageInfo.rotationDegrees
@@ -186,7 +207,9 @@ fun ScannerScreen(
                                             onUpdateLiveCandidate(candidate)
                                         }
 
-                                        // When candidate reaches multi-frame consensus threshold, snip vehicle and record
+                                        // Once a candidate reaches multi-frame consensus, snip the
+                                        // vehicle region and hand it off for the final high-detail
+                                        // read + database commit.
                                         if (candidate != null && candidate.isLockedAndReady && isAutoContinuousScanEnabled) {
                                             val frameBitmap = imageProxyToBitmap(imageProxy)
                                             if (frameBitmap != null) {
@@ -226,7 +249,7 @@ fun ScannerScreen(
                 modifier = Modifier.fillMaxSize()
             )
         } else {
-            // Viewfinder placeholder when camera permission is requested
+            // Placeholder while camera permission is requested
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -239,18 +262,18 @@ fun ScannerScreen(
                 ) {
                     Icon(
                         Icons.Default.Videocam,
-                        contentDescription = "Camera Permission Required",
+                        contentDescription = "Camera permission required",
                         tint = TechCyanPrimary,
                         modifier = Modifier.size(56.dp)
                     )
                     Text(
-                        text = "Camera & GPS Access Required",
+                        text = "Camera & location access needed",
                         color = TextPrimary,
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "Point camera at vehicle plates for real-time optical recognition",
+                        text = "Point the camera at a plate to read it automatically",
                         color = TextSecondary,
                         fontSize = 12.sp
                     )
@@ -266,41 +289,36 @@ fun ScannerScreen(
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = TechCyanPrimary)
                     ) {
-                        Text("Grant Permissions", color = Color(0xFF381E72), fontWeight = FontWeight.Bold)
+                        Text("Grant permissions", color = Color(0xFF381E72), fontWeight = FontWeight.Bold)
                     }
                 }
             }
         }
 
-        // Tactical AR HUD Overlay & Laser Scanning Viewfinder
+        // Targeting reticle - sizing adapts so it stays centered and reasonably proportioned
+        // in both portrait and landscape.
         Canvas(modifier = Modifier.fillMaxSize()) {
             val w = size.width
             val h = size.height
 
-            val boxW = w * 0.88f
-            val boxH = h * 0.35f
+            val boxW = if (isLandscape) w * 0.5f else w * 0.88f
+            val boxH = if (isLandscape) h * 0.55f else h * 0.35f
             val boxLeft = (w - boxW) / 2
-            val boxTop = (h - boxH) / 2.5f
+            val boxTop = if (isLandscape) (h - boxH) / 2f else (h - boxH) / 2.5f
 
-            // Corner Brackets
             val cornerLen = 36f
             val strokeW = 4f
             val cornerColor = if (liveTrackingCandidate != null) AlertGreen else TechCyanPrimary
 
-            // Top-Left
             drawLine(cornerColor, Offset(boxLeft, boxTop), Offset(boxLeft + cornerLen, boxTop), strokeW)
             drawLine(cornerColor, Offset(boxLeft, boxTop), Offset(boxLeft, boxTop + cornerLen), strokeW)
-            // Top-Right
             drawLine(cornerColor, Offset(boxLeft + boxW, boxTop), Offset(boxLeft + boxW - cornerLen, boxTop), strokeW)
             drawLine(cornerColor, Offset(boxLeft + boxW, boxTop), Offset(boxLeft + boxW, boxTop + cornerLen), strokeW)
-            // Bottom-Left
             drawLine(cornerColor, Offset(boxLeft, boxTop + boxH), Offset(boxLeft + cornerLen, boxTop + boxH), strokeW)
             drawLine(cornerColor, Offset(boxLeft, boxTop + boxH), Offset(boxLeft, boxTop + boxH - cornerLen), strokeW)
-            // Bottom-Right
             drawLine(cornerColor, Offset(boxLeft + boxW, boxTop + boxH), Offset(boxLeft + boxW - cornerLen, boxTop + boxH), strokeW)
             drawLine(cornerColor, Offset(boxLeft + boxW, boxTop + boxH), Offset(boxLeft + boxW, boxTop + boxH - cornerLen), strokeW)
 
-            // Scanning Laser Line
             val laserY = boxTop + (boxH * laserPosition)
             drawLine(
                 brush = Brush.horizontalGradient(
@@ -318,7 +336,7 @@ fun ScannerScreen(
             )
         }
 
-        // Live AR Target Lock Indicator with Temporal Consensus Gauge
+        // Live detection readout
         liveTrackingCandidate?.let { candidate ->
             Box(
                 modifier = Modifier
@@ -354,24 +372,19 @@ fun ScannerScreen(
                                 fontWeight = FontWeight.Black,
                                 letterSpacing = 1.5.sp
                             )
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                Text(
-                                    text = if (isLocked) "VERIFIED CONSENSUS LOCK" else "ACQUIRING (${candidate.consensusHits}/3 FRAMES)",
-                                    color = if (isLocked) AlertGreen else TechCyanDim,
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
+                            Text(
+                                text = if (isLocked) "Confirmed" else "Reading... (${candidate.consensusHits}/3)",
+                                color = if (isLocked) AlertGreen else TechCyanDim,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold
+                            )
                         }
                     }
                 }
             }
         }
 
-        // Top Status Bar: Optical Stream Status
+        // Top status bar
         Column(
             modifier = Modifier
                 .align(Alignment.TopCenter)
@@ -397,7 +410,7 @@ fun ScannerScreen(
                                 .background(AlertGreen)
                         )
                         Text(
-                            text = "LIVE SENTRY: AUTO-LOGGING DETECTED PLATES",
+                            text = "Auto-capture on",
                             color = AlertGreen,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
@@ -411,7 +424,7 @@ fun ScannerScreen(
                                 .background(TechCyanPrimary)
                         )
                         Text(
-                            text = "MANUAL SHUTTER MODE",
+                            text = "Manual capture",
                             color = TextPrimary,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
@@ -420,16 +433,32 @@ fun ScannerScreen(
                     }
                 }
             }
+
+            if (isAutoContinuousScanEnabled && !hasLocationPermission) {
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = AlertOrangeBg,
+                    border = BorderStroke(1.dp, AlertOrange)
+                ) {
+                    Text(
+                        text = "Location permission is off - sightings won't be located",
+                        color = AlertOrange,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                    )
+                }
+            }
         }
 
-        // Live Auto-Captured Vehicle Snapshot Banner
+        // Most recent auto-captured sighting
         AnimatedVisibility(
             visible = lastScannedResult != null,
             enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
             exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(bottom = 125.dp, start = 16.dp, end = 16.dp)
+                .padding(bottom = bannerBottomPadding, start = 16.dp, end = 16.dp)
         ) {
             lastScannedResult?.let { sighting ->
                 Surface(
@@ -449,7 +478,6 @@ fun ScannerScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        // Snipped Vehicle Thumbnail Preview
                         Box(
                             modifier = Modifier
                                 .size(54.dp)
@@ -460,7 +488,7 @@ fun ScannerScreen(
                             if (!sighting.snapshotUri.isNullOrBlank() && File(sighting.snapshotUri).exists()) {
                                 AsyncImage(
                                     model = File(sighting.snapshotUri),
-                                    contentDescription = "Snipped Vehicle",
+                                    contentDescription = "Captured vehicle",
                                     modifier = Modifier.fillMaxSize(),
                                     contentScale = ContentScale.Crop
                                 )
@@ -490,14 +518,14 @@ fun ScannerScreen(
 
                             Spacer(modifier = Modifier.height(2.dp))
                             Text(
-                                text = "📍 ${sighting.locationName}",
+                                text = sighting.locationName,
                                 color = TextSecondary,
                                 fontSize = 11.sp,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
                             Text(
-                                text = "Snipped & Geotagged • ${formatTimestamp(sighting.timestamp)}",
+                                text = formatTimestamp(sighting.timestamp),
                                 color = TechCyanDim,
                                 fontSize = 10.sp
                             )
@@ -505,7 +533,7 @@ fun ScannerScreen(
 
                         Icon(
                             Icons.Default.ChevronRight,
-                            contentDescription = "View Dossier",
+                            contentDescription = "View details",
                             tint = TechCyanPrimary
                         )
                     }
@@ -513,12 +541,12 @@ fun ScannerScreen(
             }
         }
 
-        // Bottom Capture Controls Bar
+        // Bottom capture controls
         Surface(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .height(115.dp),
+                .height(bottomBarHeight),
             color = TechDarkBg.copy(alpha = 0.95f),
             border = BorderStroke(1.dp, TechCardBorder)
         ) {
@@ -529,7 +557,6 @@ fun ScannerScreen(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                // Gallery import button
                 IconButton(
                     onClick = { galleryLauncher.launch("image/*") },
                     modifier = Modifier
@@ -540,13 +567,12 @@ fun ScannerScreen(
                 ) {
                     Icon(
                         imageVector = Icons.Default.PhotoLibrary,
-                        contentDescription = "Pick Image",
+                        contentDescription = "Pick image",
                         tint = TechCyanPrimary,
                         modifier = Modifier.size(22.dp)
                     )
                 }
 
-                // Sentry Mode Auto-Log Toggle Button
                 Surface(
                     modifier = Modifier
                         .clickable { onToggleAutoScan() }
@@ -565,12 +591,12 @@ fun ScannerScreen(
                     ) {
                         Icon(
                             imageVector = if (isAutoContinuousScanEnabled) Icons.Default.Videocam else Icons.Default.VideocamOff,
-                            contentDescription = "Auto Sentry Mode",
+                            contentDescription = "Toggle auto-capture",
                             tint = if (isAutoContinuousScanEnabled) AlertGreen else TextSecondary,
                             modifier = Modifier.size(20.dp)
                         )
                         Text(
-                            text = if (isAutoContinuousScanEnabled) "AUTO-LOG: ON" else "AUTO-LOG: OFF",
+                            text = if (isAutoContinuousScanEnabled) "Auto: On" else "Auto: Off",
                             color = if (isAutoContinuousScanEnabled) AlertGreen else TextSecondary,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold
@@ -578,7 +604,6 @@ fun ScannerScreen(
                     }
                 }
 
-                // Manual Shutter Button
                 Box(
                     modifier = Modifier
                         .size(68.dp)
@@ -621,14 +646,13 @@ fun ScannerScreen(
                     ) {
                         Icon(
                             imageVector = Icons.Default.CameraAlt,
-                            contentDescription = "Capture Plate",
+                            contentDescription = "Capture",
                             tint = Color(0xFF381E72),
                             modifier = Modifier.size(26.dp)
                         )
                     }
                 }
 
-                // Camera Lens Flip
                 IconButton(
                     onClick = {
                         lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK) {
@@ -645,7 +669,7 @@ fun ScannerScreen(
                 ) {
                     Icon(
                         imageVector = Icons.Default.FlipCameraAndroid,
-                        contentDescription = "Flip Camera",
+                        contentDescription = "Flip camera",
                         tint = TextPrimary,
                         modifier = Modifier.size(22.dp)
                     )
@@ -656,7 +680,7 @@ fun ScannerScreen(
 }
 
 /**
- * Universal ImageProxy to Bitmap converter supporting YUV_420_888 and JPEG formats
+ * Converts a captured/analyzed camera frame to a Bitmap, supporting YUV_420_888 and JPEG.
  */
 private fun imageProxyToBitmap(imageProxy: ImageProxy): Bitmap? {
     return try {

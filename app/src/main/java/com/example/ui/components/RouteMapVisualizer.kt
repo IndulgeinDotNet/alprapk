@@ -35,6 +35,13 @@ import com.example.ui.theme.*
 import kotlin.math.max
 import kotlin.math.min
 
+private data class MapBounds(
+    val centerLat: Double,
+    val centerLng: Double,
+    val latSpan: Double,
+    val lngSpan: Double
+)
+
 @Composable
 fun RouteMapVisualizer(
     sightings: List<PlateSighting>,
@@ -55,11 +62,31 @@ fun RouteMapVisualizer(
     var zoomScale by remember { mutableFloatStateOf(1f) }
     var panOffset by remember { mutableStateOf(Offset.Zero) }
 
-    // Map bounds calculation (bounding box around SF / sightings)
-    val defaultCenterLat = 37.779
-    val defaultCenterLng = -122.415
-    val latSpan = 0.08
-    val lngSpan = 0.10
+    // Frame the map around wherever the actual sightings are, instead of a fixed location -
+    // otherwise sightings recorded outside a hardcoded default city would plot off-screen.
+    val bounds = remember(sightings) {
+        val validPoints = sightings.filter { it.latitude != 0.0 || it.longitude != 0.0 }
+        if (validPoints.isEmpty()) {
+            MapBounds(centerLat = 45.5152, centerLng = -122.6784, latSpan = 0.12, lngSpan = 0.14)
+        } else {
+            val lats = validPoints.map { it.latitude }
+            val lngs = validPoints.map { it.longitude }
+            val minLat = lats.min()
+            val maxLat = lats.max()
+            val minLng = lngs.min()
+            val maxLng = lngs.max()
+            MapBounds(
+                centerLat = (minLat + maxLat) / 2,
+                centerLng = (minLng + maxLng) / 2,
+                latSpan = max(0.02, (maxLat - minLat) * 1.6),
+                lngSpan = max(0.02, (maxLng - minLng) * 1.6)
+            )
+        }
+    }
+    val defaultCenterLat = bounds.centerLat
+    val defaultCenterLng = bounds.centerLng
+    val latSpan = bounds.latSpan
+    val lngSpan = bounds.lngSpan
 
     Box(
         modifier = modifier
@@ -242,7 +269,7 @@ fun RouteMapVisualizer(
                         modifier = Modifier.size(16.dp)
                     )
                     Text(
-                        text = if (selectedPlateFilter != null) "Route Track: $selectedPlateFilter (${filteredSightings.size} pts)" else "Live Geotag Map (${filteredSightings.size} spots)",
+                        text = if (selectedPlateFilter != null) "$selectedPlateFilter (${filteredSightings.size} stops)" else "${filteredSightings.size} sightings",
                         color = TextPrimary,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold
@@ -330,7 +357,7 @@ fun RouteMapVisualizer(
                             )
                             if (s.isFlagged) {
                                 Text(
-                                    text = "🚨 ${s.flagReason ?: "FLAGGED"}",
+                                    text = s.flagReason ?: "Flagged",
                                     color = AlertRed,
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.Bold,

@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.local.SnapshotStorageManager
+import com.example.data.location.HeadingHelper
 import com.example.data.location.LocationHelper
 import com.example.data.model.AlertSeverity
 import com.example.data.model.DashboardStats
@@ -30,6 +31,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = PlateRepository(application)
     private val scanner = OfflinePlateScanner(application)
     private val locationHelper = LocationHelper(application)
+    private val headingHelper = HeadingHelper(application)
     private val snapshotManager = SnapshotStorageManager(application)
 
     val currentTab = MutableStateFlow(AppTab.DASHBOARD)
@@ -65,9 +67,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun toggleAutoContinuousScan() {
         isAutoContinuousScanEnabled.value = !isAutoContinuousScanEnabled.value
         snackbarMessage.value = if (isAutoContinuousScanEnabled.value) {
-            "🔴 Auto-Log Active"
+            "Auto-capture on"
         } else {
-            "⏸️ Manual Shutter Mode"
+            "Manual capture mode"
         }
     }
 
@@ -90,8 +92,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch {
             try {
-                // 1. Get real GPS location from device hardware
+                // 1. Get real GPS location and device heading
                 val loc = locationHelper.getCurrentLocation()
+                val heading = headingHelper.getCurrentHeading()
 
                 // 2. Snip vehicle & plate bounding area from camera frame
                 val snippedVehicle = scanner.snipVehicleFromBitmap(frameBitmap, candidate.boundingBox)
@@ -120,8 +123,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     vehicleType = candidate.vehicleType,
                     confidenceScore = finalConfidence,
                     snapshotUri = savedSnapshotPath,
-                    notes = "Real-Time Video ALPR Capture",
-                    speedMph = loc.speedMph
+                    notes = "Auto-captured while scanning",
+                    speedMph = loc.speedMph,
+                    headingDegrees = heading?.degrees ?: -1f,
+                    headingLabel = heading?.compassLabel ?: ""
                 )
 
                 lastScannedSighting.value = newSighting
@@ -129,9 +134,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 // 6. Trigger alert if vehicle matches active watchlist
                 if (newSighting.isFlagged) {
                     activeRealTimeAlert.value = newSighting
-                    snackbarMessage.value = "🚨 WATCHLIST HIT: ${newSighting.plateNumber}"
+                    snackbarMessage.value = "Watchlist match: ${newSighting.plateNumber}"
                 } else {
-                    snackbarMessage.value = "🎯 Verified Plate: ${newSighting.plateNumber}"
+                    snackbarMessage.value = "Logged: ${newSighting.plateNumber}"
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -200,8 +205,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     return@launch
                 }
 
-                // 2. Fetch real GPS coordinates from device
+                // 2. Fetch real GPS coordinates and device heading
                 val loc = locationHelper.getCurrentLocation()
+                val heading = headingHelper.getCurrentHeading()
 
                 // 3. Snip vehicle & plate region
                 val snippedVehicle = scanner.snipVehicleFromBitmap(bitmap, result.boundingBox)
@@ -221,16 +227,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     confidenceScore = result.confidence,
                     snapshotUri = savedSnapshotPath,
                     notes = result.notes,
-                    speedMph = loc.speedMph
+                    speedMph = loc.speedMph,
+                    headingDegrees = heading?.degrees ?: -1f,
+                    headingLabel = heading?.compassLabel ?: ""
                 )
 
                 lastScannedSighting.value = newSighting
 
                 if (newSighting.isFlagged) {
                     activeRealTimeAlert.value = newSighting
-                    snackbarMessage.value = "🚨 WATCHLIST HIT: ${newSighting.plateNumber}"
+                    snackbarMessage.value = "Watchlist match: ${newSighting.plateNumber}"
                 } else {
-                    snackbarMessage.value = "Plate ${newSighting.plateNumber} Logged"
+                    snackbarMessage.value = "Logged plate ${newSighting.plateNumber}"
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -244,7 +252,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun syncWithCloud() {
         viewModelScope.launch {
             repository.syncAllWithCloud()
-            snackbarMessage.value = "Cloud Sync Complete"
+            snackbarMessage.value = "Sync complete"
         }
     }
 
@@ -263,7 +271,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 vehicleDesc = vehicleDesc,
                 ownerOrCase = caseNum
             )
-            snackbarMessage.value = "Plate $plateNumber added to Watchlist"
+            snackbarMessage.value = "Added $plateNumber to watchlist"
         }
     }
 
@@ -277,7 +285,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun deleteWatchlistPlate(plateNumber: String) {
         viewModelScope.launch {
             repository.deleteWatchlistPlate(plateNumber)
-            snackbarMessage.value = "Removed $plateNumber from Watchlist"
+            snackbarMessage.value = "Removed $plateNumber from watchlist"
         }
     }
 
@@ -300,11 +308,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 repository.addFlaggedPlate(
                     plateNumber = sighting.plateNumber,
                     severity = AlertSeverity.WARNING,
-                    reason = "Flagged during patrol inspection",
+                    reason = "Flagged during review",
                     vehicleDesc = "${sighting.vehicleColor} ${sighting.vehicleMake} ${sighting.vehicleModel}",
-                    ownerOrCase = "Patrol Unit"
+                    ownerOrCase = "Manual flag"
                 )
-                snackbarMessage.value = "Added ${sighting.plateNumber} to Watchlist"
+                snackbarMessage.value = "Added ${sighting.plateNumber} to watchlist"
             }
             selectedDetailSighting.value = null
         }

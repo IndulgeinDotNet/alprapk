@@ -140,9 +140,9 @@ fun DatabaseScreen(
             modifier = Modifier.fillMaxWidth()
         ) {
             val chips = listOf(
-                "ALL" to "All Sightings (${sightings.size})",
-                "FLAGGED" to "🚨 Watchlist Only",
-                "REPEAT" to "🔁 Repeat Targets",
+                "ALL" to "All (${sightings.size})",
+                "FLAGGED" to "Watchlist only",
+                "REPEAT" to "Seen more than once",
                 "SEDAN" to "Sedans",
                 "SUV" to "SUVs",
                 "TRUCK" to "Trucks"
@@ -179,7 +179,7 @@ fun DatabaseScreen(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = "${filteredList.size} Sightings Logged",
+                text = "${filteredList.size} sightings",
                 color = TextSecondary,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Medium
@@ -199,7 +199,7 @@ fun DatabaseScreen(
                     )
                     Spacer(modifier = Modifier.width(4.dp))
                     Text(
-                        text = "Clear Sightings",
+                        text = "Clear all",
                         color = AlertRed.copy(alpha = 0.85f),
                         fontSize = 11.sp,
                         fontWeight = FontWeight.SemiBold
@@ -207,7 +207,7 @@ fun DatabaseScreen(
                 }
             } else {
                 Text(
-                    text = "Live ALPR Ready",
+                    text = "No sightings yet",
                     color = TechCyanDim,
                     fontSize = 11.sp
                 )
@@ -235,13 +235,13 @@ fun DatabaseScreen(
                         modifier = Modifier.size(48.dp)
                     )
                     Text(
-                        text = "No matching vehicle sightings found",
+                        text = "No sightings found",
                         color = TextSecondary,
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "Try scanning a new license plate or clearing filters",
+                        text = "Try a different search or clear the filters",
                         color = TextMuted,
                         fontSize = 12.sp
                     )
@@ -294,7 +294,7 @@ fun DatabaseScreen(
                                         )
                                     }
                                     Text(
-                                        text = "📍 ${sighting.locationName}",
+                                        text = sighting.locationName,
                                         color = TextSecondary,
                                         fontSize = 11.sp,
                                         maxLines = 1,
@@ -333,7 +333,7 @@ fun DatabaseScreen(
                                     modifier = Modifier.fillMaxWidth()
                                 ) {
                                     Text(
-                                        text = "🚨 ${sighting.flagReason}",
+                                        text = sighting.flagReason,
                                         color = AlertRed,
                                         fontSize = 11.sp,
                                         fontWeight = FontWeight.Bold,

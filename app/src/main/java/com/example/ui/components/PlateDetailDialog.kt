@@ -66,7 +66,7 @@ fun PlateDetailDialog(
                 ) {
                     Column {
                         Text(
-                            text = "VEHICLE SURVEILLANCE DOSSIER",
+                            text = "VEHICLE DETAILS",
                             color = TechCyanPrimary,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
@@ -120,13 +120,13 @@ fun PlateDetailDialog(
                                 ) {
                                     SeverityBadge(sighting.alertSeverity)
                                     Text(
-                                        text = if (sighting.isFlagged) (sighting.flagReason ?: "Flagged on Watchlist") else "Status: Clear / No Active Warrants",
+                                        text = if (sighting.isFlagged) (sighting.flagReason ?: "Flagged on watchlist") else "No flags",
                                         color = if (sighting.isFlagged) AlertRed else AlertGreen,
                                         fontSize = 12.sp,
                                         fontWeight = FontWeight.Bold
                                     )
                                     Text(
-                                        text = "Spotted ${historySightings.size} times in patrol database",
+                                        text = "Seen ${historySightings.size} times",
                                         color = TextSecondary,
                                         fontSize = 11.sp
                                     )
@@ -155,7 +155,7 @@ fun PlateDetailDialog(
                                     ) {
                                         Icon(Icons.Default.PhotoCamera, contentDescription = null, tint = TechCyanPrimary, modifier = Modifier.size(16.dp))
                                         Text(
-                                            text = "CAMERA & VEHICLE SNAPSHOT",
+                                            text = "SNAPSHOT",
                                             color = TechCyanPrimary,
                                             fontSize = 11.sp,
                                             fontWeight = FontWeight.Bold
@@ -199,23 +199,6 @@ fun PlateDetailDialog(
                                             )
                                         }
                                     }
-
-                                    // Optical target reticle on snapshot
-                                    Box(
-                                        modifier = Modifier
-                                            .align(Alignment.BottomEnd)
-                                            .padding(8.dp)
-                                            .clip(RoundedCornerShape(6.dp))
-                                            .background(Color.Black.copy(alpha = 0.75f))
-                                            .padding(horizontal = 8.dp, vertical = 4.dp)
-                                    ) {
-                                        Text(
-                                            text = "TARGET ACQUIRED",
-                                            color = TechCyanPrimary,
-                                            fontSize = 9.sp,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                    }
                                 }
                             }
                         }
@@ -234,29 +217,32 @@ fun PlateDetailDialog(
                                 verticalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
                                 Text(
-                                    text = "TELEMETRY & GEOTAG LOG",
+                                    text = "DETAILS",
                                     color = TechCyanPrimary,
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.Bold
                                 )
 
                                 DossierRow("Vehicle", "${sighting.vehicleColor} ${sighting.vehicleMake} ${sighting.vehicleModel} (${sighting.vehicleType})")
-                                DossierRow("Spotted At", formatTimestamp(sighting.timestamp))
+                                DossierRow("Time", formatTimestamp(sighting.timestamp))
                                 DossierRow("Location", sighting.locationName)
-                                DossierRow("GPS Coordinates", "${sighting.latitude}, ${sighting.longitude}")
-                                DossierRow("Recorded Speed", "${sighting.spotSpeedMph} mph")
-                                DossierRow("Cloud Sync Status", if (sighting.isSynced) "Synced to Cloud (ID: ${sighting.cloudId})" else "Pending Sync")
+                                DossierRow("Coordinates", "${sighting.latitude}, ${sighting.longitude}")
+                                if (sighting.headingDegrees >= 0f) {
+                                    DossierRow("Facing", "${sighting.headingLabel} (${sighting.headingDegrees.toInt()}°)")
+                                }
+                                DossierRow("Speed", "${sighting.spotSpeedMph} mph")
+                                DossierRow("Sync status", if (sighting.isSynced) "Synced (ID: ${sighting.cloudId})" else "Pending sync")
                                 if (!sighting.notes.isNullOrBlank()) {
-                                    DossierRow("Vision Notes", sighting.notes)
+                                    DossierRow("Notes", sighting.notes)
                                 }
                             }
                         }
                     }
 
-                    // 4. Historical Sightings Timeline for this vehicle
+                    // 4. Sighting history for this vehicle
                     item {
                         Text(
-                            text = "HISTORICAL SIGHTING TIMELINE (${historySightings.size} SPOTS)",
+                            text = "SIGHTING HISTORY (${historySightings.size})",
                             color = TechCyanPrimary,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold
@@ -291,7 +277,7 @@ fun PlateDetailDialog(
 
                                 if (hist.isFlagged) {
                                     Text(
-                                        text = "🚨 ALERT",
+                                        text = "FLAGGED",
                                         color = AlertRed,
                                         fontSize = 10.sp,
                                         fontWeight = FontWeight.Bold

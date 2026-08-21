@@ -51,9 +51,9 @@ fun RouteMapScreen(
             .padding(16.dp)
             .testTag("route_map_screen")
     ) {
-        // Vehicle Trajectory Selector
+        // Vehicle filter
         Text(
-            text = "TARGET TRAJECTORY FILTER",
+            text = "FILTER BY VEHICLE",
             color = TechCyanPrimary,
             fontSize = 11.sp,
             fontWeight = FontWeight.Bold,
@@ -76,7 +76,7 @@ fun RouteMapScreen(
                     border = BorderStroke(1.dp, if (selectedPlateFilter == null) TechCyanPrimary else TechCardBorder)
                 ) {
                     Text(
-                        text = "🌐 All Vehicles (${sightings.size})",
+                        text = "All (${sightings.size})",
                         color = if (selectedPlateFilter == null) Color(0xFF381E72) else TextPrimary,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
@@ -107,7 +107,7 @@ fun RouteMapScreen(
                         horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
                         Text(
-                            text = if (isFlagged) "🚨 $plate" else plate,
+                            text = plate,
                             color = if (isSelected) Color(0xFF381E72) else if (isFlagged) AlertRed else TextPrimary,
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold
@@ -152,13 +152,13 @@ fun RouteMapScreen(
             ) {
                 Column {
                     Text(
-                        text = if (selectedPlateFilter != null) "Vehicle Trajectory: $selectedPlateFilter" else "Area Patrol Density",
+                        text = if (selectedPlateFilter != null) "Route: $selectedPlateFilter" else "All sightings",
                         color = TextPrimary,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "${currentFilteredSightings.size} Geotagged Waypoints Mapped",
+                        text = "${currentFilteredSightings.size} locations mapped",
                         color = TextSecondary,
                         fontSize = 11.sp
                     )

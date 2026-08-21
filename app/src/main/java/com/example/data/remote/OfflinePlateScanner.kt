@@ -153,15 +153,22 @@ class TemporalPlateTracker {
         // Run Multi-Frame Character-by-Character Majority Voting. Ambiguous-character
         // resolution (e.g. 6 vs G vs C) only kicks in here, where we actually have
         // multiple independent reads to disagree with each other on.
-        val voteResult = PlateSyntaxEngine.computeMajorityVote(matchedCluster.observations.map { it.rawText })
+        val voteResult = PlateSyntaxEngine.computeMajorityVote(
+            matchedCluster.observations.map { it.rawText },
+            matchedCluster.state
+        )
         matchedCluster.consensusPlate = voteResult.plate
 
         val hits = matchedCluster.observations.size
         val isAlreadyCommitted = committedPlateCooldowns.containsKey(voteResult.plate) || matchedCluster.isCommittedToDb
 
+        // Small confidence boost when the consensus plate matches the exact letter/digit
+        // shape of a known CA/WA/OR standard plate format.
+        val formatBonus = if (PlateSyntaxEngine.matchesKnownStateFormat(voteResult.plate)) 0.05f else 0f
+
         val confidence = min(
             0.99f,
-            0.55f + (voteResult.agreementRatio * 0.30f) + (min(hits, 6) * 0.02f)
+            0.55f + (voteResult.agreementRatio * 0.30f) + (min(hits, 6) * 0.02f) + formatBonus
         )
 
         // Ready for database commit only when there is enough temporal consensus, the
@@ -203,6 +210,12 @@ class TemporalPlateTracker {
 object PlateSyntaxEngine {
     data class VoteResult(val plate: String, val agreementRatio: Float)
 
+    private enum class CharKind { LETTER, DIGIT }
+
+    private data class FormatPattern(val types: List<CharKind>) {
+        val length: Int get() = types.size
+    }
+
     // Groups of characters that are commonly confused by OCR because they look alike.
     private val confusionClusters: List<Set<Char>> = listOf(
         setOf('0', 'O', 'Q', 'D'),
@@ -218,18 +231,62 @@ object PlateSyntaxEngine {
 
     private fun clusterOf(c: Char): Set<Char> = confusionClusters.firstOrNull { it.contains(c) } ?: setOf(c)
 
+    // Standard passenger-plate layouts for the states this app is tuned for (CA/WA/OR).
+    // These are only ever used to break a genuine multi-frame tie (see computeMajorityVote)
+    // or to score how "plate-shaped" a read is - never to force-rewrite a clean read.
+    private val stateFormats: Map<String, List<FormatPattern>> = mapOf(
+        "CA" to listOf(FormatPattern(listOf(CharKind.DIGIT, CharKind.LETTER, CharKind.LETTER, CharKind.LETTER, CharKind.DIGIT, CharKind.DIGIT, CharKind.DIGIT))),
+        "WA" to listOf(FormatPattern(listOf(CharKind.LETTER, CharKind.LETTER, CharKind.LETTER, CharKind.DIGIT, CharKind.DIGIT, CharKind.DIGIT, CharKind.DIGIT))),
+        "OR" to listOf(
+            FormatPattern(listOf(CharKind.LETTER, CharKind.LETTER, CharKind.LETTER, CharKind.DIGIT, CharKind.DIGIT, CharKind.DIGIT)),
+            FormatPattern(listOf(CharKind.DIGIT, CharKind.DIGIT, CharKind.DIGIT, CharKind.LETTER, CharKind.LETTER, CharKind.LETTER))
+        )
+    )
+    private val allKnownFormats: List<FormatPattern> = stateFormats.values.flatten()
+
+    private fun kindOf(c: Char): CharKind = if (c.isDigit()) CharKind.DIGIT else CharKind.LETTER
+
+    private fun bestFormatFor(length: Int, detectedState: String?, referenceSample: String): FormatPattern? {
+        val candidates = (detectedState?.let { stateFormats[it] } ?: allKnownFormats).filter { it.length == length }
+        if (candidates.isEmpty()) return null
+        return candidates.maxByOrNull { fmt ->
+            referenceSample.indices.count { i -> kindOf(referenceSample[i]) == fmt.types[i] }
+        }
+    }
+
     fun sanitize(input: String): String {
         return input.uppercase(Locale.ROOT).replace(Regex("[^A-Z0-9]"), "")
+    }
+
+    /**
+     * Standard US passenger plates always mix letters and digits - a run of pure letters
+     * (a street name, a word) or pure digits (a house number, a phone number fragment) is
+     * almost never an actual plate. Used to reject obvious false-positive text blocks before
+     * they ever reach the OCR/voting pipeline.
+     */
+    fun looksLikePlate(text: String): Boolean {
+        return text.any { it.isDigit() } && text.any { it.isLetter() }
+    }
+
+    /**
+     * True if [text] matches the exact letter/digit shape of a known CA/WA/OR standard
+     * passenger-plate format. Used only as a confidence signal, never to rewrite characters.
+     */
+    fun matchesKnownStateFormat(text: String): Boolean {
+        val candidates = allKnownFormats.filter { it.length == text.length }
+        return candidates.any { fmt -> text.indices.all { i -> kindOf(text[i]) == fmt.types[i] } }
     }
 
     /**
      * Positional character-by-character voting across a temporal window of OCR reads.
      * A character is only overridden when the raw votes at that position are genuinely
      * split (no outright majority) - in which case we merge votes within each optical
-     * confusion cluster and pick the best-supported character from the winning cluster.
+     * confusion cluster and pick the best-supported character from the winning cluster,
+     * preferring (among characters that actually received a vote) the one matching the
+     * expected letter/digit shape for the detected state's plate format when one applies.
      * A character every frame agrees on is always kept exactly as read.
      */
-    fun computeMajorityVote(samples: List<String>): VoteResult {
+    fun computeMajorityVote(samples: List<String>, detectedState: String? = null): VoteResult {
         if (samples.isEmpty()) return VoteResult("", 0f)
         if (samples.size == 1) return VoteResult(samples[0], 1f)
 
@@ -238,6 +295,16 @@ object PlateSyntaxEngine {
 
         val validSamples = samples.filter { it.length == mostCommonLength }
         if (validSamples.isEmpty()) return VoteResult(samples.last(), 0f)
+
+        // Plain per-position top vote (no cluster merging), used only as a reference to pick
+        // the best-fitting known state format - not part of the actual output.
+        val rawGuess = StringBuilder()
+        for (i in 0 until mostCommonLength) {
+            val freq = mutableMapOf<Char, Int>()
+            for (sample in validSamples) freq[sample[i]] = (freq[sample[i]] ?: 0) + 1
+            rawGuess.append(freq.maxByOrNull { it.value }!!.key)
+        }
+        val formatHint = bestFormatFor(mostCommonLength, detectedState, rawGuess.toString())
 
         val resultBuilder = StringBuilder()
         var agreementSum = 0f
@@ -266,9 +333,23 @@ object PlateSyntaxEngine {
                     clusterVotes[cluster] = (clusterVotes[cluster] ?: 0) + count
                 }
                 val bestCluster = clusterVotes.maxByOrNull { it.value }?.key
-                val resolved = bestCluster?.let { cluster ->
+                var resolved = bestCluster?.let { cluster ->
                     charFrequency.filterKeys { it in cluster }.maxByOrNull { it.value }
                 } ?: topEntry
+
+                // Among characters that actually received a vote in this winning cluster,
+                // prefer the one matching the expected type for a known state format.
+                if (formatHint != null) {
+                    val expectedKind = formatHint.types[i]
+                    if (kindOf(resolved.key) != expectedKind) {
+                        val clusterOfResolved = clusterOf(resolved.key)
+                        val typeMatch = charFrequency.entries
+                            .filter { clusterOf(it.key) == clusterOfResolved && kindOf(it.key) == expectedKind }
+                            .maxByOrNull { it.value }
+                        if (typeMatch != null) resolved = typeMatch
+                    }
+                }
+
                 winningChar = resolved.key
                 winningCount = charFrequency.entries
                     .filter { clusterOf(it.key) == clusterOf(winningChar) }
@@ -354,7 +435,7 @@ class OfflinePlateScanner(private val context: Context) {
                 val rawText = line.text.uppercase(Locale.ROOT).trim()
                 val cleaned = rawText.replace(Regex("[^A-Z0-9]"), "")
 
-                if (cleaned.length in 4..8 && !nonPlateWords.contains(cleaned)) {
+                if (cleaned.length in 4..8 && !nonPlateWords.contains(cleaned) && PlateSyntaxEngine.looksLikePlate(cleaned)) {
                     if (box != null) {
                         val w = box.width().toFloat()
                         val h = box.height().toFloat()
@@ -458,7 +539,7 @@ class OfflinePlateScanner(private val context: Context) {
             targetHeight.toFloat() / crop.height
         } else 1f
 
-        val zoomed = if (scale > 1f) {
+        val scaled = if (scale > 1f) {
             Bitmap.createScaledBitmap(
                 crop,
                 max(1, (crop.width * scale).toInt()),
@@ -466,6 +547,11 @@ class OfflinePlateScanner(private val context: Context) {
                 true
             )
         } else crop
+
+        // Stretch contrast so faint or washed-out plate text becomes crisp black/white -
+        // this is the single biggest lever for OCR accuracy on a small, real-world plate
+        // crop (reflections, shadows, low-contrast paint all hurt raw recognition badly).
+        val zoomed = enhanceContrast(scaled)
 
         var result: Pair<String, Rect>? = null
         try {
@@ -478,7 +564,7 @@ class OfflinePlateScanner(private val context: Context) {
             for (block in visionText.textBlocks) {
                 for (line in block.lines) {
                     val cleaned = line.text.uppercase(Locale.ROOT).replace(Regex("[^A-Z0-9]"), "")
-                    if (cleaned.length in 4..8 && cleaned.length >= bestLen) {
+                    if (cleaned.length in 4..8 && cleaned.length >= bestLen && PlateSyntaxEngine.looksLikePlate(cleaned)) {
                         best = cleaned
                         bestLen = cleaned.length
                         bestBox = line.boundingBox
@@ -500,10 +586,47 @@ class OfflinePlateScanner(private val context: Context) {
         } catch (e: Exception) {
             result = null
         } finally {
-            if (zoomed !== crop) zoomed.recycle()
+            if (zoomed !== scaled) zoomed.recycle()
+            if (scaled !== crop) scaled.recycle()
             crop.recycle()
         }
         return result
+    }
+
+    /**
+     * Simple per-channel contrast stretch: maps the darkest pixel in the crop to black and
+     * the brightest to white, spreading everything else linearly between. Cheap (one bulk
+     * pixel read/write, no per-pixel JNI calls) and only ever run on a small already-cropped
+     * plate region, not on full camera frames.
+     */
+    private fun enhanceContrast(bitmap: Bitmap): Bitmap {
+        val w = bitmap.width
+        val h = bitmap.height
+        if (w <= 0 || h <= 0) return bitmap
+
+        val pixels = IntArray(w * h)
+        bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
+
+        val lum = FloatArray(pixels.size)
+        var minLum = 255f
+        var maxLum = 0f
+        for (i in pixels.indices) {
+            val p = pixels[i]
+            val l = Color.red(p) * 0.299f + Color.green(p) * 0.587f + Color.blue(p) * 0.114f
+            lum[i] = l
+            if (l < minLum) minLum = l
+            if (l > maxLum) maxLum = l
+        }
+
+        val range = (maxLum - minLum).coerceAtLeast(1f)
+        for (i in pixels.indices) {
+            val stretched = (((lum[i] - minLum) / range) * 255f).coerceIn(0f, 255f).toInt()
+            pixels[i] = Color.rgb(stretched, stretched, stretched)
+        }
+
+        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        out.setPixels(pixels, 0, w, 0, 0, w, h)
+        return out
     }
 
     /**
@@ -550,7 +673,7 @@ class OfflinePlateScanner(private val context: Context) {
             for (block in visionText.textBlocks) {
                 for (line in block.lines) {
                     val cleaned = line.text.uppercase(Locale.ROOT).replace(Regex("[^A-Z0-9]"), "")
-                    if (cleaned.length in 4..8 && !nonPlateWords.contains(cleaned)) {
+                    if (cleaned.length in 4..8 && !nonPlateWords.contains(cleaned) && PlateSyntaxEngine.looksLikePlate(cleaned)) {
                         val box = line.boundingBox ?: block.boundingBox
 
                         // Zoom into the detected region and re-read it at higher effective

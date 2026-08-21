@@ -95,7 +95,9 @@ class PlateRepository(private val context: Context) {
         confidenceScore: Float,
         snapshotUri: String?,
         notes: String?,
-        speedMph: Int = 25
+        speedMph: Int = 25,
+        headingDegrees: Float = -1f,
+        headingLabel: String = ""
     ): PlateSighting = withContext(Dispatchers.IO) {
         val cleanPlate = plateNumber.trim().uppercase().replace(" ", "")
         // Check if plate matches active watchlist
@@ -124,7 +126,9 @@ class PlateRepository(private val context: Context) {
             notes = notes,
             isSynced = false,
             cloudId = UUID.randomUUID().toString().take(8),
-            spotSpeedMph = speedMph
+            spotSpeedMph = speedMph,
+            headingDegrees = headingDegrees,
+            headingLabel = headingLabel
         )
 
         val newId = plateDao.insertSighting(sighting)

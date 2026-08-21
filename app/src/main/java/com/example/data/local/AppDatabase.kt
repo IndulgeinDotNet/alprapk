@@ -9,7 +9,7 @@ import com.example.data.model.PlateSighting
 
 @Database(
     entities = [PlateSighting::class, FlaggedPlate::class],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
