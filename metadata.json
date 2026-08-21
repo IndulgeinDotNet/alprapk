@@ -1,0 +1,6 @@
+{
+  "name": "PlateTracker",
+  "description": "Camera-to-text license plate recognition tracker with geotagging, route mapping, car snapshot logs, real-time flagged alerts, and cloud synchronization.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
