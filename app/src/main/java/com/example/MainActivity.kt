@@ -360,6 +360,9 @@ fun MainAppScaffold(viewModel: MainViewModel) {
                         viewModel.closeSightingDetail()
                         viewModel.setRouteFilter(plateNumber)
                         viewModel.setTab(AppTab.ROUTE_MAP)
+                    },
+                    onEditPlateNumber = { sighting, newPlateNumber ->
+                        viewModel.editSightingPlateNumber(sighting, newPlateNumber)
                     }
                 )
             }

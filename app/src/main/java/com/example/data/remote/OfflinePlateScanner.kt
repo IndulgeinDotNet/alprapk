@@ -31,15 +31,6 @@ data class LivePlateCandidate(
     val engineUsed: String = "On-Device Optical ALPR"
 )
 
-/** Result of re-checking a live candidate against the full-quality captured frame. */
-sealed class PlateRefinement {
-    data class Refined(val plateNumber: String) : PlateRefinement()
-    /** The region's background doesn't look like an actual plate - don't log this sighting. */
-    object Rejected : PlateRefinement()
-    /** Re-check didn't change anything meaningful - trust the original temporal consensus. */
-    object Inconclusive : PlateRefinement()
-}
-
 data class PlateScanResult(
     val plateNumber: String,
     val stateOrRegion: String,
@@ -704,29 +695,6 @@ class OfflinePlateScanner(private val context: Context) {
             true
         } finally {
             sample?.recycle()
-        }
-    }
-
-    /**
-     * Runs the zoom & re-read pass on a live-captured frame to sharpen up the final
-     * committed plate text. A refined read is only accepted when it closely agrees with the
-     * multi-frame temporal consensus (same length, at most one character different) - so a
-     * single noisy zoomed read can refine a close call but can never override a well-established
-     * consensus with something wildly different. If the region itself doesn't look like a plate
-     * (wrong background color/brightness), the whole candidate is rejected outright.
-     */
-    suspend fun refinePlateFromFrame(frameBitmap: Bitmap, consensusPlate: String, boundingBox: Rect?): PlateRefinement {
-        if (boundingBox == null) return PlateRefinement.Inconclusive
-        return withContext(Dispatchers.Default) {
-            if (!isPlausiblePlateRegion(frameBitmap, boundingBox)) {
-                return@withContext PlateRefinement.Rejected
-            }
-            val refined = rescanZoomedRegion(frameBitmap, boundingBox)?.first
-            if (refined != null && refined.length == consensusPlate.length && levenshteinDistance(refined, consensusPlate) <= 1) {
-                PlateRefinement.Refined(refined)
-            } else {
-                PlateRefinement.Inconclusive
-            }
         }
     }
 

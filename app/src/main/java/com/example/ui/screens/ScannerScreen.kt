@@ -120,8 +120,7 @@ fun ScannerScreen(
     ) { uri: Uri? ->
         uri?.let {
             try {
-                val inputStream: InputStream? = context.contentResolver.openInputStream(it)
-                val bitmap = BitmapFactory.decodeStream(inputStream)
+                val bitmap = loadUprightBitmapFromUri(context, it)
                 if (bitmap != null) {
                     onCaptureImage(bitmap)
                 }
@@ -703,9 +702,69 @@ fun ScannerScreen(
 }
 
 /**
- * Converts a captured/analyzed camera frame to a Bitmap, supporting YUV_420_888 and JPEG.
+ * Loads a picked gallery image and applies its EXIF orientation tag - many camera apps store
+ * photos in the sensor's raw orientation and rely on that tag for display, which
+ * [BitmapFactory] does not apply automatically, so a picked plate photo can otherwise come out
+ * sideways the same way an unrotated camera capture does.
+ */
+private fun loadUprightBitmapFromUri(context: Context, uri: Uri): Bitmap? {
+    val bitmap = context.contentResolver.openInputStream(uri)?.use { input ->
+        BitmapFactory.decodeStream(input)
+    } ?: return null
+
+    val rotationDegrees = try {
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            val exif = androidx.exifinterface.media.ExifInterface(input)
+            when (exif.getAttributeInt(
+                androidx.exifinterface.media.ExifInterface.TAG_ORIENTATION,
+                androidx.exifinterface.media.ExifInterface.ORIENTATION_NORMAL
+            )) {
+                androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_90 -> 90
+                androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_180 -> 180
+                androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_270 -> 270
+                else -> 0
+            }
+        } ?: 0
+    } catch (e: Exception) {
+        0
+    }
+
+    if (rotationDegrees == 0) return bitmap
+
+    return try {
+        val matrix = android.graphics.Matrix().apply { postRotate(rotationDegrees.toFloat()) }
+        val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+        if (rotated !== bitmap) bitmap.recycle()
+        rotated
+    } catch (e: Exception) {
+        bitmap
+    }
+}
+
+/**
+ * Converts a captured/analyzed camera frame to an upright Bitmap, supporting YUV_420_888 and
+ * JPEG. The raw sensor buffer is normally in landscape orientation regardless of how the phone
+ * is held - CameraX reports how much rotation is needed to make it upright via
+ * [ImageProxy.getImageInfo]'s rotationDegrees, which must be applied explicitly here or every
+ * saved photo comes out sideways (the preview looks fine because PreviewView applies this
+ * rotation for you automatically; a bitmap you build yourself does not get that for free).
  */
 private fun imageProxyToBitmap(imageProxy: ImageProxy): Bitmap? {
+    val raw = rawImageProxyToBitmap(imageProxy) ?: return null
+    val rotation = imageProxy.imageInfo.rotationDegrees
+    if (rotation == 0) return raw
+
+    return try {
+        val matrix = android.graphics.Matrix().apply { postRotate(rotation.toFloat()) }
+        val rotated = Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, matrix, true)
+        if (rotated !== raw) raw.recycle()
+        rotated
+    } catch (e: Exception) {
+        raw
+    }
+}
+
+private fun rawImageProxyToBitmap(imageProxy: ImageProxy): Bitmap? {
     return try {
         imageProxy.toBitmap()
     } catch (e: Throwable) {

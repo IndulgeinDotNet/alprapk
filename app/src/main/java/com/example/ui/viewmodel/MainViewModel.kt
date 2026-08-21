@@ -13,10 +13,11 @@ import com.example.data.model.FlaggedPlate
 import com.example.data.model.PlateSighting
 import com.example.data.remote.LivePlateCandidate
 import com.example.data.remote.OfflinePlateScanner
-import com.example.data.remote.PlateRefinement
+import com.example.data.remote.levenshteinDistance
 import com.example.data.repository.PlateRepository
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import kotlin.math.max
 import kotlin.math.min
 
 enum class AppTab(val title: String) {
@@ -97,26 +98,43 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val loc = locationHelper.getCurrentLocation()
                 val heading = headingHelper.getCurrentHeading()
 
-                // 2. Snip vehicle & plate bounding area from camera frame
-                val snippedVehicle = scanner.snipVehicleFromBitmap(frameBitmap, candidate.boundingBox)
-                val savedSnapshotPath = snapshotManager.saveBitmapSnapshot(snippedVehicle, candidate.plateNumber)
+                // 2. Re-locate the plate directly on the captured frame instead of reusing the
+                // bounding box from the live temporal tracker: that box was computed by ML Kit
+                // against a differently-oriented buffer than this upright captured frame, so
+                // reusing it here would crop the wrong region entirely (and had been - this is
+                // what was showing the wrong photo and the wrong plate number). Running a fresh
+                // scan on this exact bitmap finds the plate in its own coordinate space, and
+                // already applies the confidence and background-color checks.
+                val freshScan = scanner.scanVehicleImage(frameBitmap)
 
-                // 3. Detect dominant vehicle paint color from cropped image
-                val vehicleColor = scanner.detectDominantColor(snippedVehicle)
+                val finalPlateNumber: String
+                val finalConfidence: Float
+                val snippedVehicle: Bitmap
+                val vehicleColor: String
 
-                // 4. Zoom into the plate region on the full-resolution captured frame and
-                // re-read it, so a vehicle photographed from a normal distance still gets a
-                // sharp, close-up character read for the final committed plate number. If the
-                // region's background doesn't actually look like a plate (a sign, foliage,
-                // etc.), drop this sighting entirely rather than logging bogus text.
-                val refinement = scanner.refinePlateFromFrame(frameBitmap, candidate.plateNumber, candidate.boundingBox)
-                if (refinement is PlateRefinement.Rejected) {
-                    return@launch
+                if (freshScan != null &&
+                    freshScan.plateNumber.length == candidate.plateNumber.length &&
+                    levenshteinDistance(freshScan.plateNumber, candidate.plateNumber) <= 2
+                ) {
+                    // Fresh read confirms (and can sharpen) the multi-frame consensus.
+                    finalPlateNumber = freshScan.plateNumber
+                    finalConfidence = max(freshScan.confidence, candidate.confidence)
+                    snippedVehicle = scanner.snipVehicleFromBitmap(frameBitmap, freshScan.boundingBox)
+                    vehicleColor = freshScan.vehicleColor
+                } else {
+                    // Either nothing was found on this exact frame (the vehicle moved between
+                    // the last analyzed frame and this capture) or it doesn't match the vetted
+                    // consensus closely enough to trust the box - keep the multi-frame-voted
+                    // text but don't guess a crop region, use the whole frame as the snapshot.
+                    finalPlateNumber = candidate.plateNumber
+                    finalConfidence = candidate.confidence
+                    snippedVehicle = frameBitmap
+                    vehicleColor = scanner.detectDominantColor(frameBitmap)
                 }
-                val finalPlateNumber = (refinement as? PlateRefinement.Refined)?.plateNumber ?: candidate.plateNumber
-                val finalConfidence = if (refinement is PlateRefinement.Refined) min(0.99f, candidate.confidence + 0.05f) else candidate.confidence
 
-                // 5. Save ALPR sighting to Room database
+                val savedSnapshotPath = snapshotManager.saveBitmapSnapshot(snippedVehicle, finalPlateNumber)
+
+                // 3. Save ALPR sighting to Room database
                 val newSighting = repository.recordSighting(
                     plateNumber = finalPlateNumber,
                     stateOrRegion = candidate.stateOrRegion,
@@ -137,7 +155,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
                 lastScannedSighting.value = newSighting
 
-                // 6. Trigger alert if vehicle matches active watchlist
+                // 4. Trigger alert if vehicle matches active watchlist
                 if (newSighting.isFlagged) {
                     activeRealTimeAlert.value = newSighting
                     snackbarMessage.value = "Watchlist match: ${newSighting.plateNumber}"
@@ -302,6 +320,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 selectedDetailSighting.value = null
             }
             snackbarMessage.value = "Sighting deleted"
+        }
+    }
+
+    fun editSightingPlateNumber(sighting: PlateSighting, newPlateNumber: String) {
+        viewModelScope.launch {
+            val updated = repository.updateSightingPlateNumber(sighting, newPlateNumber)
+            if (updated == null) {
+                snackbarMessage.value = "Plate number can't be blank"
+                return@launch
+            }
+            selectedDetailSighting.value = updated
+            if (lastScannedSighting.value?.id == updated.id) {
+                lastScannedSighting.value = updated
+            }
+            snackbarMessage.value = "Plate number updated to ${updated.plateNumber}"
         }
     }
 

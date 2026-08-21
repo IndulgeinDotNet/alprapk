@@ -167,6 +167,22 @@ class PlateRepository(private val context: Context) {
         plateDao.deleteSighting(sighting)
     }
 
+    suspend fun updateSightingPlateNumber(sighting: PlateSighting, newPlateNumber: String): PlateSighting? =
+        withContext(Dispatchers.IO) {
+            val cleanPlate = newPlateNumber.trim().uppercase().replace(" ", "")
+            if (cleanPlate.isBlank()) return@withContext null
+
+            val activeFlag = flaggedDao.findActiveFlaggedPlate(cleanPlate)
+            val updated = sighting.copy(
+                plateNumber = cleanPlate,
+                isFlagged = activeFlag != null,
+                flagReason = activeFlag?.reason ?: sighting.flagReason,
+                alertSeverity = activeFlag?.severity ?: sighting.alertSeverity
+            )
+            plateDao.updateSighting(updated)
+            updated
+        }
+
     suspend fun clearAllSightings() = withContext(Dispatchers.IO) {
         plateDao.deleteAllSightings()
     }
