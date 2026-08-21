@@ -15,6 +15,7 @@ import com.example.data.remote.OfflinePlateScanner
 import com.example.data.repository.PlateRepository
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import kotlin.math.min
 
 enum class AppTab(val title: String) {
     DASHBOARD("Dashboard"),
@@ -99,9 +100,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 // 3. Detect dominant vehicle paint color from cropped image
                 val vehicleColor = scanner.detectDominantColor(snippedVehicle)
 
-                // 4. Save ALPR sighting to Room database
+                // 4. Zoom into the plate region on the full-resolution captured frame and
+                // re-read it, so a vehicle photographed from a normal distance still gets a
+                // sharp, close-up character read for the final committed plate number.
+                val refinedPlate = scanner.refinePlateFromFrame(frameBitmap, candidate.plateNumber, candidate.boundingBox)
+                val finalPlateNumber = refinedPlate ?: candidate.plateNumber
+                val finalConfidence = if (refinedPlate != null) min(0.99f, candidate.confidence + 0.05f) else candidate.confidence
+
+                // 5. Save ALPR sighting to Room database
                 val newSighting = repository.recordSighting(
-                    plateNumber = candidate.plateNumber,
+                    plateNumber = finalPlateNumber,
                     stateOrRegion = candidate.stateOrRegion,
                     latitude = loc.latitude,
                     longitude = loc.longitude,
@@ -110,7 +118,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     vehicleModel = candidate.vehicleModel,
                     vehicleColor = vehicleColor,
                     vehicleType = candidate.vehicleType,
-                    confidenceScore = candidate.confidence,
+                    confidenceScore = finalConfidence,
                     snapshotUri = savedSnapshotPath,
                     notes = "Real-Time Video ALPR Capture",
                     speedMph = loc.speedMph
@@ -118,7 +126,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
                 lastScannedSighting.value = newSighting
 
-                // 5. Trigger alert if vehicle matches active watchlist
+                // 6. Trigger alert if vehicle matches active watchlist
                 if (newSighting.isFlagged) {
                     activeRealTimeAlert.value = newSighting
                     snackbarMessage.value = "🚨 WATCHLIST HIT: ${newSighting.plateNumber}"

@@ -162,9 +162,12 @@ fun ScannerScreen(
                             .build()
                         imageCapture = capture
 
-                        // High-speed low-latency continuous stream image analyzer
+                        // High-speed low-latency continuous stream image analyzer.
+                        // Higher analysis resolution than the preview so plate characters
+                        // still have enough pixels to read when the whole vehicle - not just
+                        // the plate - fills the frame (i.e. the user doesn't have to get close).
                         val imageAnalysis = ImageAnalysis.Builder()
-                            .setTargetResolution(Size(1280, 720))
+                            .setTargetResolution(Size(1920, 1080))
                             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                             .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
                             .build()

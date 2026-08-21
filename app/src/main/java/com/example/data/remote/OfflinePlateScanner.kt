@@ -14,7 +14,6 @@ import kotlinx.coroutines.withContext
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
-import java.util.regex.Pattern
 import kotlin.math.max
 import kotlin.math.min
 
@@ -44,6 +43,30 @@ data class PlateScanResult(
     val engineUsed: String = "On-Device Optical ALPR",
     val boundingBox: Rect? = null
 )
+
+/** Minimum accepted confidence before a read is trusted enough to surface or log. */
+const val MIN_ACCEPTABLE_CONFIDENCE = 0.60f
+
+/** Minimum average positional character agreement across frames before a live consensus is trusted. */
+private const val MIN_AGREEMENT_RATIO = 0.65f
+
+fun levenshteinDistance(a: String, b: String): Int {
+    val dp = Array(a.length + 1) { IntArray(b.length + 1) }
+    for (i in 0..a.length) dp[i][0] = i
+    for (j in 0..b.length) dp[0][j] = j
+
+    for (i in 1..a.length) {
+        for (j in 1..b.length) {
+            val cost = if (a[i - 1] == b[j - 1]) 0 else 1
+            dp[i][j] = minOf(
+                dp[i - 1][j] + 1,
+                dp[i][j - 1] + 1,
+                dp[i - 1][j - 1] + cost
+            )
+        }
+    }
+    return dp[a.length][b.length]
+}
 
 /**
  * Production-grade Temporal Frame Accumulator & Consensus Voting Engine
@@ -88,18 +111,21 @@ class TemporalPlateTracker {
 
         if (rawPlateCandidate.isBlank()) return null
 
-        // Apply Positional Syntax Disambiguation
-        val correctedPlate = PlateSyntaxEngine.disambiguateCharacters(rawPlateCandidate)
-        if (correctedPlate.length !in 4..8) return null
+        // Only sanitize the raw per-frame reading here. Do NOT force-rewrite characters
+        // against an assumed plate format yet - a single frame is not enough evidence that
+        // a character was misread, and doing so used to "correct" perfectly clean reads
+        // (e.g. a real C forced into 6) before the multi-frame vote ever saw the raw data.
+        val sanitized = PlateSyntaxEngine.sanitize(rawPlateCandidate)
+        if (sanitized.length !in 4..8) return null
 
         // Match to existing tracked cluster using Levenshtein distance
         var matchedCluster = activeClusters.firstOrNull { cluster ->
-            levenshteinDistance(cluster.consensusPlate, correctedPlate) <= 2
+            levenshteinDistance(cluster.consensusPlate, sanitized) <= 2
         }
 
         if (matchedCluster == null) {
             matchedCluster = TrackedPlateCluster(
-                consensusPlate = correctedPlate,
+                consensusPlate = sanitized,
                 state = detectedState,
                 lastSeenTimestamp = now,
                 bestBox = box
@@ -116,7 +142,7 @@ class TemporalPlateTracker {
         }
 
         matchedCluster.observations.add(
-            FrameObservation(correctedPlate, now, box, detectedState)
+            FrameObservation(sanitized, now, box, detectedState)
         )
 
         // Keep last 10 observations in sliding window
@@ -124,21 +150,33 @@ class TemporalPlateTracker {
             matchedCluster.observations.removeAt(0)
         }
 
-        // Run Multi-Frame Character-by-Character Majority Voting
-        val votedPlate = computeMajorityVotePlate(matchedCluster.observations.map { it.rawText })
-        matchedCluster.consensusPlate = votedPlate
+        // Run Multi-Frame Character-by-Character Majority Voting. Ambiguous-character
+        // resolution (e.g. 6 vs G vs C) only kicks in here, where we actually have
+        // multiple independent reads to disagree with each other on.
+        val voteResult = PlateSyntaxEngine.computeMajorityVote(matchedCluster.observations.map { it.rawText })
+        matchedCluster.consensusPlate = voteResult.plate
 
         val hits = matchedCluster.observations.size
-        val isAlreadyCommitted = committedPlateCooldowns.containsKey(votedPlate) || matchedCluster.isCommittedToDb
+        val isAlreadyCommitted = committedPlateCooldowns.containsKey(voteResult.plate) || matchedCluster.isCommittedToDb
 
-        // Ready for database commit when consensus threshold is met and not in cooldown
-        val isReadyForCommit = hits >= MIN_CONSENSUS_HITS_FOR_COMMIT && !isAlreadyCommitted
+        val confidence = min(
+            0.99f,
+            0.55f + (voteResult.agreementRatio * 0.30f) + (min(hits, 6) * 0.02f)
+        )
+
+        // Ready for database commit only when there is enough temporal consensus, the
+        // characters actually agree across frames, and confidence clears the floor -
+        // this is what throws out the low-confidence / flickery reads instead of logging them.
+        val isReadyForCommit = hits >= MIN_CONSENSUS_HITS_FOR_COMMIT &&
+                voteResult.agreementRatio >= MIN_AGREEMENT_RATIO &&
+                confidence >= MIN_ACCEPTABLE_CONFIDENCE &&
+                !isAlreadyCommitted
 
         return LivePlateCandidate(
-            plateNumber = votedPlate,
+            plateNumber = voteResult.plate,
             stateOrRegion = matchedCluster.state,
             boundingBox = matchedCluster.bestBox,
-            confidence = min(0.99f, 0.85f + (hits * 0.03f)),
+            confidence = confidence,
             consensusHits = hits,
             isLockedAndReady = isReadyForCommit
         )
@@ -150,148 +188,98 @@ class TemporalPlateTracker {
         committedPlateCooldowns[plateNumber] = now
         activeClusters.find { it.consensusPlate == plateNumber }?.isCommittedToDb = true
     }
+}
+
+/**
+ * Character-confusion aware helpers.
+ *
+ * Historically this engine force-rewrote every character against an assumed positional
+ * plate format (e.g. "digit, letter, letter, letter, digit, digit, digit"). That blindly
+ * turned correctly-read characters into the wrong one whenever a plate didn't match the
+ * assumed format - which is most of them, since US plate formats vary a lot by state and
+ * plate class. Now the confusion map is only used to break a genuine tie when multiple
+ * independent OCR reads of the same plate actually disagree at a given character position.
+ */
+object PlateSyntaxEngine {
+    data class VoteResult(val plate: String, val agreementRatio: Float)
+
+    // Groups of characters that are commonly confused by OCR because they look alike.
+    private val confusionClusters: List<Set<Char>> = listOf(
+        setOf('0', 'O', 'Q', 'D'),
+        setOf('1', 'I', 'L', '|'),
+        setOf('2', 'Z'),
+        setOf('3', 'E'),
+        setOf('4', 'A'),
+        setOf('5', 'S'),
+        setOf('6', 'G', 'C'),
+        setOf('8', 'B'),
+        setOf('9', 'P')
+    )
+
+    private fun clusterOf(c: Char): Set<Char> = confusionClusters.firstOrNull { it.contains(c) } ?: setOf(c)
+
+    fun sanitize(input: String): String {
+        return input.uppercase(Locale.ROOT).replace(Regex("[^A-Z0-9]"), "")
+    }
 
     /**
-     * Positional character-by-character frequency voting across temporal window
+     * Positional character-by-character voting across a temporal window of OCR reads.
+     * A character is only overridden when the raw votes at that position are genuinely
+     * split (no outright majority) - in which case we merge votes within each optical
+     * confusion cluster and pick the best-supported character from the winning cluster.
+     * A character every frame agrees on is always kept exactly as read.
      */
-    private fun computeMajorityVotePlate(samples: List<String>): String {
-        if (samples.isEmpty()) return ""
-        if (samples.size == 1) return samples[0]
+    fun computeMajorityVote(samples: List<String>): VoteResult {
+        if (samples.isEmpty()) return VoteResult("", 0f)
+        if (samples.size == 1) return VoteResult(samples[0], 1f)
 
-        // Group by most common sample length
         val mostCommonLength = samples.groupBy { it.length }
             .maxByOrNull { it.value.size }?.key ?: samples.first().length
 
         val validSamples = samples.filter { it.length == mostCommonLength }
-        if (validSamples.isEmpty()) return samples.last()
+        if (validSamples.isEmpty()) return VoteResult(samples.last(), 0f)
 
         val resultBuilder = StringBuilder()
+        var agreementSum = 0f
+
         for (i in 0 until mostCommonLength) {
             val charFrequency = mutableMapOf<Char, Int>()
             for (sample in validSamples) {
                 val c = sample[i]
                 charFrequency[c] = (charFrequency[c] ?: 0) + 1
             }
-            val winningChar = charFrequency.maxByOrNull { it.value }?.key ?: validSamples.last()[i]
+
+            val sortedVotes = charFrequency.entries.sortedByDescending { it.value }
+            val topEntry = sortedVotes.first()
+            val outrightMajority = sortedVotes.size == 1 || topEntry.value * 2 > validSamples.size
+
+            val winningChar: Char
+            val winningCount: Int
+            if (outrightMajority) {
+                winningChar = topEntry.key
+                winningCount = topEntry.value
+            } else {
+                // Genuine ambiguity: merge votes within each optical-confusion cluster.
+                val clusterVotes = mutableMapOf<Set<Char>, Int>()
+                for ((c, count) in charFrequency) {
+                    val cluster = clusterOf(c)
+                    clusterVotes[cluster] = (clusterVotes[cluster] ?: 0) + count
+                }
+                val bestCluster = clusterVotes.maxByOrNull { it.value }?.key
+                val resolved = bestCluster?.let { cluster ->
+                    charFrequency.filterKeys { it in cluster }.maxByOrNull { it.value }
+                } ?: topEntry
+                winningChar = resolved.key
+                winningCount = charFrequency.entries
+                    .filter { clusterOf(it.key) == clusterOf(winningChar) }
+                    .sumOf { it.value }
+            }
+
+            agreementSum += winningCount.toFloat() / validSamples.size
             resultBuilder.append(winningChar)
         }
 
-        // Re-pass through positional syntax engine
-        return PlateSyntaxEngine.disambiguateCharacters(resultBuilder.toString())
-    }
-
-    private fun levenshteinDistance(a: String, b: String): Int {
-        val dp = Array(a.length + 1) { IntArray(b.length + 1) }
-        for (i in 0..a.length) dp[i][0] = i
-        for (j in 0..b.length) dp[0][j] = j
-
-        for (i in 1..a.length) {
-            for (j in 1..b.length) {
-                val cost = if (a[i - 1] == b[j - 1]) 0 else 1
-                dp[i][j] = minOf(
-                    dp[i - 1][j] + 1,
-                    dp[i][j - 1] + 1,
-                    dp[i - 1][j - 1] + cost
-                )
-            }
-        }
-        return dp[a.length][b.length]
-    }
-}
-
-/**
- * Positional Syntax Disambiguation Engine:
- * Fixes optical character confusion based on positional license plate syntax
- */
-object PlateSyntaxEngine {
-    // Optical confusion maps
-    private val letterToDigit = mapOf(
-        'O' to '0', 'Q' to '0', 'D' to '0',
-        'I' to '1', 'L' to '1', 'T' to '1', '|' to '1',
-        'Z' to '2',
-        'E' to '3',
-        'A' to '4',
-        'S' to '5',
-        'G' to '6', 'C' to '6',
-        'B' to '8',
-        'P' to '9'
-    )
-
-    private val digitToLetter = mapOf(
-        '0' to 'O',
-        '1' to 'I',
-        '2' to 'Z',
-        '3' to 'E',
-        '4' to 'A',
-        '5' to 'S',
-        '6' to 'G',
-        '8' to 'B'
-    )
-
-    private fun forceDigit(c: Char): Char = letterToDigit[c] ?: c
-    private fun forceLetter(c: Char): Char = digitToLetter[c] ?: c
-
-    fun disambiguateCharacters(input: String): String {
-        val clean = input.uppercase(Locale.ROOT).replace(Regex("[^A-Z0-9]"), "")
-        if (clean.length < 4 || clean.length > 8) return clean
-
-        val chars = clean.toCharArray()
-        val len = chars.size
-
-        // Case 1: Standard 7-Character Format (e.g., California/US: 1 Digit + 3 Letters + 3 Digits -> 7ABC123)
-        // Position 0 = Digit, Positions 1..3 = Letters, Positions 4..6 = Digits
-        if (len == 7) {
-            val is7CharStdProb = (chars[0].isDigit() || letterToDigit.containsKey(chars[0])) &&
-                    (chars[4].isDigit() || chars[5].isDigit() || chars[6].isDigit())
-
-            if (is7CharStdProb) {
-                chars[0] = forceDigit(chars[0])
-                chars[1] = forceLetter(chars[1])
-                chars[2] = forceLetter(chars[2])
-                chars[3] = forceLetter(chars[3])
-                chars[4] = forceDigit(chars[4])
-                chars[5] = forceDigit(chars[5])
-                chars[6] = forceDigit(chars[6])
-                return String(chars)
-            }
-
-            // Case 2: 7-Char Alt (3 Letters + 4 Digits -> ABC1234)
-            val is3L4DProb = (chars[0].isLetter() || chars[1].isLetter()) &&
-                    (chars[5].isDigit() || chars[6].isDigit())
-            if (is3L4DProb) {
-                chars[0] = forceLetter(chars[0])
-                chars[1] = forceLetter(chars[1])
-                chars[2] = forceLetter(chars[2])
-                chars[3] = forceDigit(chars[3])
-                chars[4] = forceDigit(chars[4])
-                chars[5] = forceDigit(chars[5])
-                chars[6] = forceDigit(chars[6])
-                return String(chars)
-            }
-        }
-
-        // Case 3: Standard 6-Character Format (3 Letters + 3 Digits -> ABC123 or 1 Digit + 2 Letters + 3 Digits)
-        if (len == 6) {
-            if (chars[0].isDigit()) {
-                chars[0] = forceDigit(chars[0])
-                chars[1] = forceLetter(chars[1])
-                chars[2] = forceLetter(chars[2])
-                chars[3] = forceDigit(chars[3])
-                chars[4] = forceDigit(chars[4])
-                chars[5] = forceDigit(chars[5])
-                return String(chars)
-            } else {
-                chars[0] = forceLetter(chars[0])
-                chars[1] = forceLetter(chars[1])
-                chars[2] = forceLetter(chars[2])
-                chars[3] = forceDigit(chars[3])
-                chars[4] = forceDigit(chars[4])
-                chars[5] = forceDigit(chars[5])
-                return String(chars)
-            }
-        }
-
-        return clean
+        return VoteResult(resultBuilder.toString(), agreementSum / mostCommonLength)
     }
 }
 
@@ -435,6 +423,109 @@ class OfflinePlateScanner(private val context: Context) {
     }
 
     /**
+     * Zoom & Re-Read pass: crops tightly around a detected text region and upsamples it
+     * before running OCR again on just that enlarged patch. This is what lets the user
+     * photograph the whole vehicle from a normal distance instead of having to fill the
+     * frame with the plate - the plate region gets digitally "zoomed into" for the actual
+     * character read, independent of how much of the original frame it occupied.
+     *
+     * Returns the re-read text and its bounding box translated back into the coordinate
+     * space of [bitmap], or null if the zoomed patch didn't yield a usable read.
+     */
+    private fun rescanZoomedRegion(bitmap: Bitmap, boundingBox: Rect): Pair<String, Rect>? {
+        val width = bitmap.width
+        val height = bitmap.height
+        if (width <= 0 || height <= 0) return null
+
+        val padX = (boundingBox.width() * 0.35f).toInt().coerceAtLeast(6)
+        val padY = (boundingBox.height() * 0.6f).toInt().coerceAtLeast(6)
+
+        val left = (boundingBox.left - padX).coerceIn(0, width - 1)
+        val top = (boundingBox.top - padY).coerceIn(0, height - 1)
+        val right = (boundingBox.right + padX).coerceIn(left + 10, width)
+        val bottom = (boundingBox.bottom + padY).coerceIn(top + 10, height)
+
+        val cropWidth = right - left
+        val cropHeight = bottom - top
+        if (cropWidth < 10 || cropHeight < 10) return null
+
+        val crop = Bitmap.createBitmap(bitmap, left, top, cropWidth, cropHeight)
+
+        // Upscale so plate characters are tall enough for the recognizer to resolve
+        // reliably, regardless of how small they were in the original frame.
+        val targetHeight = 220
+        val scale = if (crop.height in 1 until targetHeight) {
+            targetHeight.toFloat() / crop.height
+        } else 1f
+
+        val zoomed = if (scale > 1f) {
+            Bitmap.createScaledBitmap(
+                crop,
+                max(1, (crop.width * scale).toInt()),
+                targetHeight,
+                true
+            )
+        } else crop
+
+        var result: Pair<String, Rect>? = null
+        try {
+            val inputImage = InputImage.fromBitmap(zoomed, 0)
+            val visionText = Tasks.await(textRecognizer.process(inputImage), 2, TimeUnit.SECONDS)
+
+            var best: String? = null
+            var bestBox: Rect? = null
+            var bestLen = 0
+            for (block in visionText.textBlocks) {
+                for (line in block.lines) {
+                    val cleaned = line.text.uppercase(Locale.ROOT).replace(Regex("[^A-Z0-9]"), "")
+                    if (cleaned.length in 4..8 && cleaned.length >= bestLen) {
+                        best = cleaned
+                        bestLen = cleaned.length
+                        bestBox = line.boundingBox
+                    }
+                }
+            }
+
+            if (best != null) {
+                val translatedBox = bestBox?.let {
+                    Rect(
+                        left + (it.left / scale).toInt(),
+                        top + (it.top / scale).toInt(),
+                        left + (it.right / scale).toInt(),
+                        top + (it.bottom / scale).toInt()
+                    )
+                } ?: boundingBox
+                result = best to translatedBox
+            }
+        } catch (e: Exception) {
+            result = null
+        } finally {
+            if (zoomed !== crop) zoomed.recycle()
+            crop.recycle()
+        }
+        return result
+    }
+
+    /**
+     * Runs the zoom & re-read pass on a live-captured frame to sharpen up the final
+     * committed plate text. Only accepted when it closely agrees with the multi-frame
+     * temporal consensus (same length, at most one character different) - so a single
+     * noisy zoomed read can refine a close call but can never override a well-established
+     * consensus with something wildly different.
+     */
+    suspend fun refinePlateFromFrame(frameBitmap: Bitmap, consensusPlate: String, boundingBox: Rect?): String? {
+        if (boundingBox == null) return null
+        return withContext(Dispatchers.Default) {
+            val refined = rescanZoomedRegion(frameBitmap, boundingBox)?.first ?: return@withContext null
+            if (refined.length == consensusPlate.length && levenshteinDistance(refined, consensusPlate) <= 1) {
+                refined
+            } else {
+                null
+            }
+        }
+    }
+
+    /**
      * Scans a single still image for license plates using on-device optical recognition.
      */
     suspend fun scanVehicleImage(bitmap: Bitmap): PlateScanResult? = withContext(Dispatchers.Default) {
@@ -460,18 +551,38 @@ class OfflinePlateScanner(private val context: Context) {
                 for (line in block.lines) {
                     val cleaned = line.text.uppercase(Locale.ROOT).replace(Regex("[^A-Z0-9]"), "")
                     if (cleaned.length in 4..8 && !nonPlateWords.contains(cleaned)) {
-                        val corrected = PlateSyntaxEngine.disambiguateCharacters(cleaned)
+                        val box = line.boundingBox ?: block.boundingBox
+
+                        // Zoom into the detected region and re-read it at higher effective
+                        // resolution. This is what allows the photo to be taken from a
+                        // normal "whole vehicle" distance instead of a close-up of the plate.
+                        val refined = box?.let { rescanZoomedRegion(bitmap, it) }
+                        val finalText = refined?.first ?: cleaned
+                        val finalBox = refined?.second ?: box
+
+                        // Trust a clean OCR read as-is - no blind positional character
+                        // rewriting here, just strip anything that isn't alphanumeric.
+                        val plateText = PlateSyntaxEngine.sanitize(finalText)
+                        if (plateText.length !in 4..8) continue
+
+                        val confidence = estimateRegionQuality(bitmap, finalBox)
+                        if (confidence < MIN_ACCEPTABLE_CONFIDENCE) {
+                            // Low-quality read (too blurry / too small / too far away) -
+                            // throw it out instead of logging an unreliable guess.
+                            continue
+                        }
+
                         val detectedColor = detectDominantColor(bitmap)
                         return@withContext PlateScanResult(
-                            plateNumber = corrected,
+                            plateNumber = plateText,
                             stateOrRegion = detectedState ?: "US",
                             vehicleMake = "Vehicle",
                             vehicleModel = "Automotive",
                             vehicleColor = detectedColor,
                             vehicleType = "Passenger Vehicle",
-                            confidence = 0.98f,
+                            confidence = confidence,
                             notes = "Optical ALPR Text Recognition",
-                            boundingBox = line.boundingBox ?: block.boundingBox
+                            boundingBox = finalBox
                         )
                     }
                 }
@@ -481,6 +592,75 @@ class OfflinePlateScanner(private val context: Context) {
         }
 
         return@withContext null
+    }
+
+    /**
+     * Estimates how trustworthy a detected plate region is, combining a sharpness signal
+     * (blurry/noisy text has low local contrast between neighboring pixels) with how large
+     * the plate region is relative to the full frame (a tiny box means the plate was too far
+     * away to resolve reliably). Replaces the previous hardcoded confidence value so low
+     * quality reads can actually be filtered out instead of always reporting near-100%.
+     */
+    private fun estimateRegionQuality(bitmap: Bitmap, box: Rect?): Float {
+        try {
+            val width = bitmap.width
+            val height = bitmap.height
+            if (width <= 0 || height <= 0) return 0.5f
+
+            val region = box?.let {
+                Rect(
+                    it.left.coerceIn(0, width - 1),
+                    it.top.coerceIn(0, height - 1),
+                    it.right.coerceIn(it.left + 1, width),
+                    it.bottom.coerceIn(it.top + 1, height)
+                )
+            }
+
+            val sample: Bitmap? = if (region != null && region.width() > 4 && region.height() > 4) {
+                Bitmap.createBitmap(bitmap, region.left, region.top, region.width(), region.height())
+            } else null
+            val target: Bitmap = sample ?: bitmap
+
+            val sw = target.width
+            val sh = target.height
+            val stepX = max(1, sw / 60)
+            val stepY = max(1, sh / 30)
+
+            var sum = 0.0
+            var sumSq = 0.0
+            var n = 0
+
+            for (y in 0 until sh step stepY) {
+                var prevLum = -1.0
+                for (x in 0 until sw step stepX) {
+                    val pixel = target.getPixel(x, y)
+                    val lum = Color.red(pixel) * 0.299 + Color.green(pixel) * 0.587 + Color.blue(pixel) * 0.114
+                    if (prevLum >= 0) {
+                        val diff = lum - prevLum
+                        sum += diff
+                        sumSq += diff * diff
+                        n++
+                    }
+                    prevLum = lum
+                }
+            }
+
+            sample?.recycle()
+
+            val variance = if (n > 0) (sumSq / n) - (sum / n) * (sum / n) else 0.0
+            // Typical sharp text edges land in the low hundreds to low thousands; blurry
+            // or washed-out regions land much lower.
+            val sharpnessScore = (variance / 900.0).coerceIn(0.0, 1.0).toFloat()
+
+            val sizeScore = if (region != null) {
+                val boxHeightRatio = region.height().toFloat() / height.toFloat()
+                (boxHeightRatio / 0.10f).coerceIn(0f, 1f)
+            } else 0.6f
+
+            return (0.45f + sharpnessScore * 0.36f + sizeScore * 0.18f).coerceIn(0f, 0.99f)
+        } catch (e: Exception) {
+            return 0.5f
+        }
     }
 
     fun detectDominantColor(bitmap: Bitmap): String {
