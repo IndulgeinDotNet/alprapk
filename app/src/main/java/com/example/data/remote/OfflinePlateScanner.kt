@@ -31,6 +31,15 @@ data class LivePlateCandidate(
     val engineUsed: String = "On-Device Optical ALPR"
 )
 
+/** Result of re-checking a live candidate against the full-quality captured frame. */
+sealed class PlateRefinement {
+    data class Refined(val plateNumber: String) : PlateRefinement()
+    /** The region's background doesn't look like an actual plate - don't log this sighting. */
+    object Rejected : PlateRefinement()
+    /** Re-check didn't change anything meaningful - trust the original temporal consensus. */
+    object Inconclusive : PlateRefinement()
+}
+
 data class PlateScanResult(
     val plateNumber: String,
     val stateOrRegion: String,
@@ -630,20 +639,93 @@ class OfflinePlateScanner(private val context: Context) {
     }
 
     /**
-     * Runs the zoom & re-read pass on a live-captured frame to sharpen up the final
-     * committed plate text. Only accepted when it closely agrees with the multi-frame
-     * temporal consensus (same length, at most one character different) - so a single
-     * noisy zoomed read can refine a close call but can never override a well-established
-     * consensus with something wildly different.
+     * Samples the background around a candidate text region. Real license plates - including
+     * most specialty/vanity designs - are dominated by a light, fairly desaturated background
+     * (white, cream, pale blue, etc). A region that's both dark and strongly colored (green
+     * highway signage, red brick, blue parking signs, foliage) is very unlikely to actually be
+     * a plate, even if OCR manages to pull plausible-looking characters out of it. This is what
+     * keeps random street signs and stray numbers from being logged as plates.
      */
-    suspend fun refinePlateFromFrame(frameBitmap: Bitmap, consensusPlate: String, boundingBox: Rect?): String? {
-        if (boundingBox == null) return null
+    private fun plateColorPlausibility(bitmap: Bitmap): Float {
+        try {
+            val w = bitmap.width
+            val h = bitmap.height
+            if (w <= 0 || h <= 0) return 0.5f
+
+            val stepX = max(1, w / 40)
+            val stepY = max(1, h / 20)
+            var totalSat = 0f
+            var totalVal = 0f
+            var n = 0
+            val hsv = FloatArray(3)
+
+            for (y in 0 until h step stepY) {
+                for (x in 0 until w step stepX) {
+                    Color.colorToHSV(bitmap.getPixel(x, y), hsv)
+                    totalSat += hsv[1]
+                    totalVal += hsv[2]
+                    n++
+                }
+            }
+            if (n == 0) return 0.5f
+
+            val avgSat = totalSat / n
+            val avgVal = totalVal / n
+
+            return when {
+                avgVal > 0.55f -> 1f
+                avgSat < 0.35f -> 1f
+                else -> (1f - ((avgSat - 0.35f) / 0.5f)).coerceIn(0f, 1f)
+            }
+        } catch (e: Exception) {
+            return 0.5f
+        }
+    }
+
+    /** Crops a small margin around [box] and checks whether it plausibly looks like a plate. */
+    private fun isPlausiblePlateRegion(bitmap: Bitmap, box: Rect): Boolean {
+        val width = bitmap.width
+        val height = bitmap.height
+        if (width <= 0 || height <= 0) return true
+
+        val padX = (box.width() * 0.2f).toInt().coerceAtLeast(4)
+        val padY = (box.height() * 0.3f).toInt().coerceAtLeast(4)
+        val left = (box.left - padX).coerceIn(0, width - 1)
+        val top = (box.top - padY).coerceIn(0, height - 1)
+        val right = (box.right + padX).coerceIn(left + 1, width)
+        val bottom = (box.bottom + padY).coerceIn(top + 1, height)
+        if (right - left < 4 || bottom - top < 4) return true
+
+        var sample: Bitmap? = null
+        return try {
+            sample = Bitmap.createBitmap(bitmap, left, top, right - left, bottom - top)
+            plateColorPlausibility(sample) >= 0.3f
+        } catch (e: Exception) {
+            true
+        } finally {
+            sample?.recycle()
+        }
+    }
+
+    /**
+     * Runs the zoom & re-read pass on a live-captured frame to sharpen up the final
+     * committed plate text. A refined read is only accepted when it closely agrees with the
+     * multi-frame temporal consensus (same length, at most one character different) - so a
+     * single noisy zoomed read can refine a close call but can never override a well-established
+     * consensus with something wildly different. If the region itself doesn't look like a plate
+     * (wrong background color/brightness), the whole candidate is rejected outright.
+     */
+    suspend fun refinePlateFromFrame(frameBitmap: Bitmap, consensusPlate: String, boundingBox: Rect?): PlateRefinement {
+        if (boundingBox == null) return PlateRefinement.Inconclusive
         return withContext(Dispatchers.Default) {
-            val refined = rescanZoomedRegion(frameBitmap, boundingBox)?.first ?: return@withContext null
-            if (refined.length == consensusPlate.length && levenshteinDistance(refined, consensusPlate) <= 1) {
-                refined
+            if (!isPlausiblePlateRegion(frameBitmap, boundingBox)) {
+                return@withContext PlateRefinement.Rejected
+            }
+            val refined = rescanZoomedRegion(frameBitmap, boundingBox)?.first
+            if (refined != null && refined.length == consensusPlate.length && levenshteinDistance(refined, consensusPlate) <= 1) {
+                PlateRefinement.Refined(refined)
             } else {
-                null
+                PlateRefinement.Inconclusive
             }
         }
     }
@@ -675,6 +757,10 @@ class OfflinePlateScanner(private val context: Context) {
                     val cleaned = line.text.uppercase(Locale.ROOT).replace(Regex("[^A-Z0-9]"), "")
                     if (cleaned.length in 4..8 && !nonPlateWords.contains(cleaned) && PlateSyntaxEngine.looksLikePlate(cleaned)) {
                         val box = line.boundingBox ?: block.boundingBox
+
+                        // Reject regions whose background doesn't look like an actual plate
+                        // (street signs, foliage, brick) before trusting the text at all.
+                        if (box != null && !isPlausiblePlateRegion(bitmap, box)) continue
 
                         // Zoom into the detected region and re-read it at higher effective
                         // resolution. This is what allows the photo to be taken from a

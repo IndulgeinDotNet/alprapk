@@ -7,10 +7,13 @@ import android.graphics.BitmapFactory
 import android.graphics.ImageFormat
 import android.graphics.Rect
 import android.graphics.YuvImage
+import android.hardware.camera2.CaptureRequest
 import android.net.Uri
 import android.util.Size
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.camera2.interop.Camera2Interop
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
@@ -74,6 +77,7 @@ import java.util.concurrent.atomic.AtomicLong
 // temporal consensus tracker plenty of independent reads per second to vote across.
 private const val MIN_FRAME_INTERVAL_MS = 280L
 
+@androidx.annotation.OptIn(markerClass = [ExperimentalCamera2Interop::class])
 @Composable
 fun ScannerScreen(
     isScanning: Boolean,
@@ -172,18 +176,37 @@ fun ScannerScreen(
                                 it.setSurfaceProvider(previewView.surfaceProvider)
                             }
 
-                        val capture = ImageCapture.Builder()
-                            .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-                            .build()
+                        // A manually triggered photo benefits more from sharpness than shutter
+                        // latency - use the higher-quality capture pipeline for it.
+                        val captureBuilder = ImageCapture.Builder()
+                            .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+                        val capture = captureBuilder.build()
                         imageCapture = capture
 
                         // Continuous stream analyzer, throttled to MIN_FRAME_INTERVAL_MS so the
                         // recognizer isn't fighting for every single incoming frame.
-                        val imageAnalysis = ImageAnalysis.Builder()
+                        val analysisBuilder = ImageAnalysis.Builder()
                             .setTargetResolution(Size(1280, 720))
                             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                             .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
-                            .build()
+
+                        // Motion blur - not resolution - is the biggest real-world accuracy
+                        // killer for a moving vehicle on a phone camera: a plate that's crisp
+                        // at a standstill smears into unreadable OCR mush at driving speed.
+                        // Locking a higher target frame rate keeps the auto-exposure algorithm
+                        // from stretching exposure time in moderate light, which caps how much
+                        // a passing plate can smear per frame. Wrapped defensively since not
+                        // every camera/HAL combination advertises this exact FPS range.
+                        try {
+                            Camera2Interop.Extender(analysisBuilder).setCaptureRequestOption(
+                                CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                                android.util.Range(30, 30)
+                            )
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
+
+                        val imageAnalysis = analysisBuilder.build()
 
                         imageAnalysis.setAnalyzer(analysisExecutor) { imageProxy ->
                             val now = System.currentTimeMillis()

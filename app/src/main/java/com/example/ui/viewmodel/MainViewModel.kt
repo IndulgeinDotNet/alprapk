@@ -13,6 +13,7 @@ import com.example.data.model.FlaggedPlate
 import com.example.data.model.PlateSighting
 import com.example.data.remote.LivePlateCandidate
 import com.example.data.remote.OfflinePlateScanner
+import com.example.data.remote.PlateRefinement
 import com.example.data.repository.PlateRepository
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -105,10 +106,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
                 // 4. Zoom into the plate region on the full-resolution captured frame and
                 // re-read it, so a vehicle photographed from a normal distance still gets a
-                // sharp, close-up character read for the final committed plate number.
-                val refinedPlate = scanner.refinePlateFromFrame(frameBitmap, candidate.plateNumber, candidate.boundingBox)
-                val finalPlateNumber = refinedPlate ?: candidate.plateNumber
-                val finalConfidence = if (refinedPlate != null) min(0.99f, candidate.confidence + 0.05f) else candidate.confidence
+                // sharp, close-up character read for the final committed plate number. If the
+                // region's background doesn't actually look like a plate (a sign, foliage,
+                // etc.), drop this sighting entirely rather than logging bogus text.
+                val refinement = scanner.refinePlateFromFrame(frameBitmap, candidate.plateNumber, candidate.boundingBox)
+                if (refinement is PlateRefinement.Rejected) {
+                    return@launch
+                }
+                val finalPlateNumber = (refinement as? PlateRefinement.Refined)?.plateNumber ?: candidate.plateNumber
+                val finalConfidence = if (refinement is PlateRefinement.Refined) min(0.99f, candidate.confidence + 0.05f) else candidate.confidence
 
                 // 5. Save ALPR sighting to Room database
                 val newSighting = repository.recordSighting(
